@@ -88,6 +88,12 @@ type Raft struct {
 	applyCh         chan ApplyMsg
 }
 
+/*
+****************************
+*		General			   *
+****************************
+ */
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -96,9 +102,17 @@ func (rf *Raft) GetState() (int, bool) {
 	return int(rf.currentTerm), rf.state == leader
 }
 
+func (rf *Raft) State() State {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.state
+}
+
 /*
-	State Change
-*/
+****************************
+*	  State Transition	   *
+****************************
+ */
 
 func (rf *Raft) convertToFollower(term uint64) {
 	log.Printf("follower:%s\n", rf.id)
@@ -127,8 +141,10 @@ func (rf *Raft) convertToLeader() {
 }
 
 /*
-	Persistence
-*/
+****************************
+*	    Persistence		   *
+****************************
+ */
 
 //
 // save Raft's persistent state to stable storage,
@@ -169,8 +185,10 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 /*
-	RequestVote RPC
-*/
+****************************
+*	   Request Vote		   *
+****************************
+ */
 
 //
 // example RequestVote RPC arguments structure.
@@ -265,8 +283,10 @@ func (rf *Raft) handleVoteResponse(response RequestVoteResponse, voteCh chan<- b
 }
 
 /*
-	AppendEntries RPC
-*/
+****************************
+*	   Append Entries	   *
+****************************
+ */
 
 type AppendEntriesRequest struct {
 	Term         uint64     // leader's term
@@ -402,6 +422,12 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, res
 	return ok
 }
 
+/*
+****************************
+*	       Event		   *
+****************************
+ */
+
 func (rf *Raft) electLeader(voteCh chan bool) {
 	for i := range rf.peers {
 		if i != rf.me {
@@ -428,6 +454,13 @@ func (rf *Raft) heartbeat() {
 	}
 }
 
+/*
+****************************
+*	     State Loop		   *
+****************************
+ */
+
+// follower can only convert to candidate
 func (rf *Raft) followerLoop() {
 	electionTimer := time.NewTimer(rf.electionTimeout)
 	for {
@@ -450,33 +483,34 @@ func (rf *Raft) candidateLoop() {
 	electionTicker := time.NewTicker(rf.electionTimeout)
 	rf.electLeader(voteCh)
 
-	for {
+	for rf.State() == candidate {
 		select {
 		case <-voteCh:
 			votes++
 			log.Printf("votes: %d\n", votes)
 			if votes > len(rf.peers)/2 {
+				rf.mu.Lock()
 				rf.convertToLeader()
+				rf.mu.Unlock()
 				return
 			}
-		default:
-		}
-
-		select {
 		case <-electionTicker.C:
+			rf.mu.Lock()
 			rf.convertToCandidate()
+			rf.mu.Unlock()
 			return
-		default:
+		case <-rf.resetCh:
 		}
 	}
 }
 
 func (rf *Raft) leaderLoop() {
 	heartBeatTicker := time.NewTicker(HeartBeatInterval)
-	for {
+	for rf.State() == leader {
 		select {
 		case <-heartBeatTicker.C:
 			rf.heartbeat()
+		case <-rf.resetCh:
 		}
 	}
 }
@@ -537,20 +571,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.id = GetRandomString(8)
 	rf.state = follower
-	rf.votedFor = ``
 	rf.log = NewLog()
-	rf.electionTimeout = time.Millisecond * time.Duration(400+rand.Intn(200))
 	rf.nextIndex = make([]uint64, len(rf.peers))
 	rf.matchIndex = make([]uint64, len(rf.peers))
 	rf.resetCh = make(chan bool)
 
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rf.electionTimeout = time.Millisecond * time.Duration(400+r.Intn(200))
+
 	go func() {
 		for {
-			rf.mu.Lock()
-			state := rf.state
-			rf.mu.Unlock()
-
-			switch state {
+			switch rf.State() {
 			case leader:
 				rf.leaderLoop()
 			case candidate:

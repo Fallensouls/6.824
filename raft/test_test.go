@@ -10,7 +10,6 @@ package raft
 
 import (
 	"fmt"
-	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -62,12 +61,12 @@ func TestReElection2A(t *testing.T) {
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
-
+	fmt.Printf("leader1:%d\n", leader1)
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
-	log.Printf("leader2:%d", leader2)
+	fmt.Printf("leader2:%d\n", leader2)
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
