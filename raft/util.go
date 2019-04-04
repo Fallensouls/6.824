@@ -3,17 +3,28 @@ package raft
 import (
 	"log"
 	"math/rand"
+	"os"
 	"time"
 )
 
-// Debugging
-const Debug = 0
+type Logger struct {
+	debug bool
+	*log.Logger
+}
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
+var logger = NewLogger(true)
+
+func NewLogger(debug bool) *Logger {
+	return &Logger{
+		debug,
+		log.New(os.Stderr, `[Raft]`, log.Ldate|log.Ltime|log.Lmicroseconds),
 	}
-	return
+}
+
+func (l *Logger) Printf(format string, v ...interface{}) {
+	if l.debug {
+		l.Logger.Printf(format, v...)
+	}
 }
 
 func min(a, b uint64) uint64 {
@@ -23,7 +34,7 @@ func min(a, b uint64) uint64 {
 	return a
 }
 
-func GetRandomString(l int) string {
+func RandomID(l int) string {
 	str := "0123456789abcdefghijklmnopqrstuvwxyz"
 	bytes := []byte(str)
 	var result []byte

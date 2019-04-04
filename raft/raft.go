@@ -115,29 +115,32 @@ func (rf *Raft) State() State {
  */
 
 func (rf *Raft) convertToFollower(term uint64) {
-	log.Printf("follower:%s\n", rf.id)
-	log.Printf("follower term: %d\n", rf.currentTerm)
 	rf.currentTerm = term
 	rf.state = follower
 	rf.votedFor = ``
 	rf.resetCh <- true
+
+	logger.Printf("follower id:%s\n", rf.id)
+	logger.Printf("follower term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToCandidate() {
-	log.Printf("candidate:%s\n", rf.id)
-	log.Printf("candidate term: %d\n", rf.currentTerm)
 	rf.currentTerm += 1
 	rf.state = candidate
 	rf.votedFor = rf.id
+
+	logger.Printf("candidate id:%s\n", rf.id)
+	logger.Printf("candidate term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToLeader() {
-	log.Printf("leader:%s\n", rf.id)
-	log.Printf("leader term: %d\n", rf.currentTerm)
 	rf.state = leader
 	rf.votedFor = ``
 	rf.nextIndex = make([]uint64, len(rf.peers))
 	rf.matchIndex = make([]uint64, len(rf.peers))
+
+	logger.Printf("leader id:%s\n", rf.id)
+	logger.Printf("leader term: %d\n", rf.currentTerm)
 }
 
 /*
@@ -261,7 +264,7 @@ func (rf *Raft) RequestVote(request *RequestVoteRequest, response *RequestVoteRe
 	}
 	// if receiver is not a candidate and upToDate is true, the candidate will receive a vote.
 	if rf.votedFor == `` && upToDate {
-		log.Printf("voted for: %s", request.CandidateId)
+		log.Printf("%s voted for: %s", rf.id, request.CandidateId)
 		rf.votedFor = request.CandidateId
 		response.VoteGranted = true
 	}
@@ -460,13 +463,17 @@ func (rf *Raft) heartbeat() {
 ****************************
  */
 
-// follower can only convert to candidate
+// FollowerLoop is loop of follower.
+// Since follower can only convert to candidate, the follower loop just wait for a election timeout,
+// or reset its election timer.
 func (rf *Raft) followerLoop() {
 	electionTimer := time.NewTimer(rf.electionTimeout)
 	for {
 		select {
 		case <-electionTimer.C:
+			rf.mu.Lock()
 			rf.convertToCandidate()
+			rf.mu.Unlock()
 			return
 		case <-rf.resetCh:
 			if !electionTimer.Stop() {
@@ -477,6 +484,11 @@ func (rf *Raft) followerLoop() {
 	}
 }
 
+// CandidateLoop is loop of candidate.
+// Candidate will have the following action:
+// 1) If votes received from majority of servers: become leader.
+// 2) If AppendEntries RPC received from new leader: convert to follower.
+// 3) If election timeout elapses: start new election.
 func (rf *Raft) candidateLoop() {
 	votes := 1
 	voteCh := make(chan bool, len(rf.peers)-1)
@@ -487,7 +499,7 @@ func (rf *Raft) candidateLoop() {
 		select {
 		case <-voteCh:
 			votes++
-			log.Printf("votes: %d\n", votes)
+			//logger.Printf("votes: %d\n", votes)
 			if votes > len(rf.peers)/2 {
 				rf.mu.Lock()
 				rf.convertToLeader()
@@ -504,6 +516,8 @@ func (rf *Raft) candidateLoop() {
 	}
 }
 
+// LeaderLoop is loop of leader.
+// Leader will convert to follower if it receives a request or response containing a higher term.
 func (rf *Raft) leaderLoop() {
 	heartBeatTicker := time.NewTicker(HeartBeatInterval)
 	for rf.State() == leader {
@@ -531,12 +545,12 @@ func (rf *Raft) leaderLoop() {
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
-	term := -1
-	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	return index, term, isLeader
+	return index, int(rf.currentTerm), rf.state == leader
 }
 
 //
@@ -569,7 +583,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.id = GetRandomString(8)
+	rf.id = RandomID(8)
 	rf.state = follower
 	rf.log = NewLog()
 	rf.nextIndex = make([]uint64, len(rf.peers))
