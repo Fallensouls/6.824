@@ -84,14 +84,14 @@ type Raft struct {
 	matchIndex []uint64
 
 	electionTimeout time.Duration
-	resetCh         chan bool
+	resetCh         chan struct{} // signal for converting to follower and reset election ticker
 	applyCh         chan ApplyMsg
 }
 
 /*
-****************************
-*		General			   *
-****************************
+*****************************
+*		   General			*
+*****************************
  */
 
 // return currentTerm and whether this server
@@ -109,16 +109,16 @@ func (rf *Raft) State() State {
 }
 
 /*
-****************************
-*	  State Transition	   *
-****************************
+*****************************
+*	  State Transition		*
+*****************************
  */
 
 func (rf *Raft) convertToFollower(term uint64) {
 	rf.currentTerm = term
 	rf.state = follower
 	rf.votedFor = ``
-	rf.resetCh <- true
+	rf.resetCh <- struct{}{}
 
 	logger.Printf("follower id:%s\n", rf.id)
 	logger.Printf("follower term: %d\n", rf.currentTerm)
@@ -139,14 +139,18 @@ func (rf *Raft) convertToLeader() {
 	rf.nextIndex = make([]uint64, len(rf.peers))
 	rf.matchIndex = make([]uint64, len(rf.peers))
 
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = rf.log.LastIndex() + 1
+	}
+
 	logger.Printf("leader id:%s\n", rf.id)
 	logger.Printf("leader term: %d\n", rf.currentTerm)
 }
 
 /*
-****************************
-*	    Persistence		   *
-****************************
+*****************************
+*	    Persistence			*
+*****************************
  */
 
 //
@@ -229,66 +233,60 @@ func (rf *Raft) NewVoteRequest() *RequestVoteRequest {
 //
 // example RequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(request *RequestVoteRequest, response *RequestVoteResponse) {
+func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	// return receiver's currentTerm for candidate to update itself.
-	response.Term = rf.currentTerm
+	res.Term = rf.currentTerm
 
-	//switch  {
-	//// reply false if candidate's term is less than receiver's currentTerm.
-	//case rf.currentTerm > request.Term:
-	//	return
-	//// reply false when receiver is also a candidate or has voted for another candidate.
-	//case rf.currentTerm == request.Term:
-	//	return
-	//// If receiver's currentTerm is less than candidate's term, receiver should update itself and convert to follower.
-	//case rf.currentTerm < request.Term:
-	//	rf.convertToFollower(request.Term)
-	//}
-
-	if rf.currentTerm >= request.Term {
+	// reply false if candidate's term is less than receiver's currentTerm.
+	// reply false when receiver is also a candidate or has voted for another candidate.
+	if rf.currentTerm >= req.Term {
 		return
 	}
-	rf.convertToFollower(request.Term)
+
+	// If receiver's currentTerm is less than candidate's term,
+	// receiver should update itself and convert to follower.
+	rf.convertToFollower(req.Term)
 
 	// check whether candidate's log is at least as up-to-date as receiver's log.
 	var upToDate bool
-	if rf.log.LastTerm() < request.LastLogTerm {
+	if rf.log.LastTerm() < req.LastLogTerm {
 		upToDate = true
 	}
-	if rf.log.LastTerm() == request.LastLogTerm && rf.log.LastIndex() <= request.LastLogIndex {
+	if rf.log.LastTerm() == req.LastLogTerm && rf.log.LastIndex() <= req.LastLogIndex {
 		upToDate = true
 	}
 	// if receiver is not a candidate and upToDate is true, the candidate will receive a vote.
 	if rf.votedFor == `` && upToDate {
-		log.Printf("%s voted for: %s", rf.id, request.CandidateId)
-		rf.votedFor = request.CandidateId
-		response.VoteGranted = true
+		log.Printf("%s voted for: %s", rf.id, req.CandidateId)
+		rf.votedFor = req.CandidateId
+		res.VoteGranted = true
 	}
+
 	// persistent state should be persisted before responding to RPCs.
 	rf.persist()
 }
 
-func (rf *Raft) handleVoteResponse(response RequestVoteResponse, voteCh chan<- bool) {
+func (rf *Raft) handleVoteResponse(res RequestVoteResponse, voteCh chan<- struct{}) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.currentTerm < response.Term {
-		rf.convertToFollower(response.Term)
+	if rf.currentTerm < res.Term {
+		rf.convertToFollower(res.Term)
 		return
 	}
-	if response.VoteGranted {
-		voteCh <- true
+	if res.VoteGranted {
+		voteCh <- struct{}{}
 	}
 }
 
 /*
-****************************
-*	   Append Entries	   *
-****************************
+*****************************
+*	   Append Entries		*
+*****************************
  */
 
 type AppendEntriesRequest struct {
@@ -303,86 +301,95 @@ type AppendEntriesRequest struct {
 type AppendEntriesResponse struct {
 	Term    uint64 // receiver's currentTerm
 	Success bool   // true if follower contained entry matching prevLogIndex and prevLogTerm
+	Index   uint64 // the index to be used for updating nextIndex and matchIndex
 
 	// extra information for conflicts
 	ConflictIndex uint64
 	ConflictTerm  uint64
 }
 
-func (rf *Raft) NewAppendEntriesRequest(server int, isHeartBeat bool) *AppendEntriesRequest {
+func (rf *Raft) NewAppendEntriesRequest(server int) *AppendEntriesRequest {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if isHeartBeat {
-		return &AppendEntriesRequest{
-			rf.currentTerm,
-			rf.id,
-			0,
-			0,
-			nil,
-			rf.commitIndex,
-		}
+
+	prevLogIndex := rf.nextIndex[server] - 1
+	entry := rf.log.Entry(rf.nextIndex[server] - 1)
+	var prevLogTerm uint64
+	if entry == nil {
+		prevLogTerm = 0
+	} else {
+		prevLogTerm = entry.Term
 	}
+
 	return &AppendEntriesRequest{
 		rf.currentTerm,
 		rf.id,
-		rf.nextIndex[server],
-		rf.log.Entry(rf.nextIndex[server]).Term,
-		rf.log.EntriesAfter(rf.nextIndex[server]),
+		prevLogIndex,
+		prevLogTerm,
+		rf.log.EntriesAfter(prevLogIndex),
 		rf.commitIndex,
 	}
 }
 
-func (rf *Raft) AppendEntries(request *AppendEntriesRequest, response *AppendEntriesResponse) {
+func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesResponse) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	// return receiver's currentTerm for candidate to update itself.
-	response.Term = rf.currentTerm
+	res.Term = rf.currentTerm
 
 	// reply false if candidate's term is less than receiver's currentTerm.
-	if rf.currentTerm > request.Term {
+	if rf.currentTerm > req.Term {
 		return
 	}
 
 	// If receiver's currentTerm is not greater than candidate's term, receiver should update itself and convert to follower.
-	if rf.currentTerm <= request.Term {
-		rf.convertToFollower(request.Term)
-		rf.leader = request.LeaderId
+	if rf.currentTerm <= req.Term {
+		rf.convertToFollower(req.Term)
+		rf.leader = req.LeaderId
 	}
 
 	// reply false if receiver's log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm.
-	entry := rf.log.Entry(request.PrevLogIndex)
-	if entry == nil || entry.Term != request.PrevLogTerm {
-		//response.ConflictIndex, response.ConflictTerm = rf.log.SearchConflict(request.PrevLogIndex, request.PrevLogTerm)
+	entry := rf.log.Entry(req.PrevLogIndex)
+	if entry == nil || entry.Term != req.PrevLogTerm {
+		//res.ConflictIndex, res.ConflictTerm = rf.log.SearchConflict(req.PrevLogIndex, req.PrevLogTerm)
 		return
 	}
 
 	// now receiver can reply true since entry matches successfully.
-	response.Success = true
+	res.Success = true
 
 	// if the last log entry matches prevLogIndex and prevLogTerm
-	if rf.log.LastIndex() == request.PrevLogIndex {
-		rf.log.entries = append(rf.log.entries, request.Entries...)
+	if rf.log.LastIndex() == req.PrevLogIndex {
+		rf.log.entries = append(rf.log.entries, req.Entries...)
 	} else {
-		storageIndex := request.PrevLogIndex - rf.log.lastIncludedIndex - 1
+		storageIndex := req.PrevLogIndex - rf.log.lastIncludedIndex - 1
 		rf.log.entries = rf.log.entries[:storageIndex]
-		rf.log.entries = append(rf.log.entries, request.Entries...)
+		rf.log.entries = append(rf.log.entries, req.Entries...)
 	}
 
-	if rf.commitIndex < request.LeaderCommit {
-		rf.commitIndex = min(request.LeaderCommit, rf.log.LastIndex())
+	if rf.commitIndex < req.LeaderCommit {
+		rf.commitIndex = min(req.LeaderCommit, rf.log.LastIndex())
 	}
+	res.Index = req.Entries[len(req.Entries)-1].Index
 
 	rf.persist()
 }
 
-func (rf *Raft) handleAppendEntriesResponse(response AppendEntriesResponse) {
+func (rf *Raft) handleAppendEntriesResponse(server int, res AppendEntriesResponse) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.currentTerm < response.Term {
-		rf.convertToFollower(response.Term)
+	if rf.currentTerm < res.Term {
+		rf.convertToFollower(res.Term)
 		return
+	}
+
+	if res.Success {
+		rf.nextIndex[server] = res.Index + 1
+		rf.matchIndex[server] = res.Index
+	} else {
+		rf.nextIndex[server]--
 	}
 }
 
@@ -426,12 +433,12 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, res
 }
 
 /*
-****************************
-*	       Event		   *
-****************************
+*****************************
+*	       Event			*
+*****************************
  */
 
-func (rf *Raft) electLeader(voteCh chan bool) {
+func (rf *Raft) electLeader(voteCh chan struct{}) {
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
@@ -444,13 +451,13 @@ func (rf *Raft) electLeader(voteCh chan bool) {
 	}
 }
 
-func (rf *Raft) heartbeat() {
+func (rf *Raft) broadcast() {
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
 				var response AppendEntriesResponse
-				if rf.sendAppendEntries(server, rf.NewAppendEntriesRequest(server, true), &response) {
-					rf.handleAppendEntriesResponse(response)
+				if rf.sendAppendEntries(server, rf.NewAppendEntriesRequest(server), &response) {
+					rf.handleAppendEntriesResponse(server, response)
 				}
 			}(i)
 		}
@@ -458,9 +465,9 @@ func (rf *Raft) heartbeat() {
 }
 
 /*
-****************************
-*	     State Loop		   *
-****************************
+*****************************
+*	     State Loop			*
+*****************************
  */
 
 // FollowerLoop is loop of follower.
@@ -491,11 +498,11 @@ func (rf *Raft) followerLoop() {
 // 3) If election timeout elapses: start new election.
 func (rf *Raft) candidateLoop() {
 	votes := 1
-	voteCh := make(chan bool, len(rf.peers)-1)
+	voteCh := make(chan struct{}, len(rf.peers)-1)
 	electionTicker := time.NewTicker(rf.electionTimeout)
 	rf.electLeader(voteCh)
 
-	for rf.State() == candidate {
+	for {
 		select {
 		case <-voteCh:
 			votes++
@@ -512,6 +519,7 @@ func (rf *Raft) candidateLoop() {
 			rf.mu.Unlock()
 			return
 		case <-rf.resetCh:
+			return
 		}
 	}
 }
@@ -520,11 +528,12 @@ func (rf *Raft) candidateLoop() {
 // Leader will convert to follower if it receives a request or response containing a higher term.
 func (rf *Raft) leaderLoop() {
 	heartBeatTicker := time.NewTicker(HeartBeatInterval)
-	for rf.State() == leader {
+	for {
 		select {
 		case <-heartBeatTicker.C:
-			rf.heartbeat()
+			rf.broadcast()
 		case <-rf.resetCh:
+			return
 		}
 	}
 }
@@ -586,9 +595,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.id = RandomID(8)
 	rf.state = follower
 	rf.log = NewLog()
-	rf.nextIndex = make([]uint64, len(rf.peers))
-	rf.matchIndex = make([]uint64, len(rf.peers))
-	rf.resetCh = make(chan bool)
+	rf.resetCh = make(chan struct{})
 
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	rf.electionTimeout = time.Millisecond * time.Duration(400+r.Intn(200))
