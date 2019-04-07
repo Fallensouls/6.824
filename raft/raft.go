@@ -90,7 +90,7 @@ type Raft struct {
 
 /*
 *****************************
-*		   General			*
+*          General          *
 *****************************
  */
 
@@ -110,7 +110,7 @@ func (rf *Raft) State() State {
 
 /*
 *****************************
-*	  State Transition		*
+*      State Transition     *
 *****************************
  */
 
@@ -120,8 +120,8 @@ func (rf *Raft) convertToFollower(term uint64) {
 	rf.votedFor = ``
 	rf.resetCh <- struct{}{}
 
-	logger.Printf("follower id:%s\n", rf.id)
-	logger.Printf("follower term: %d\n", rf.currentTerm)
+	//logger.Printf("follower id:%s\n", rf.id)
+	//logger.Printf("follower term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToCandidate() {
@@ -129,8 +129,8 @@ func (rf *Raft) convertToCandidate() {
 	rf.state = candidate
 	rf.votedFor = rf.id
 
-	logger.Printf("candidate id:%s\n", rf.id)
-	logger.Printf("candidate term: %d\n", rf.currentTerm)
+	//logger.Printf("candidate id:%s\n", rf.id)
+	//logger.Printf("candidate term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToLeader() {
@@ -143,13 +143,17 @@ func (rf *Raft) convertToLeader() {
 		rf.nextIndex[i] = rf.log.LastIndex() + 1
 	}
 
+	// add a no-op entry to local log.
+	//rf.log.AddNoOpEntry(rf.currentTerm)
+	log.Println(rf.log.entries)
+
 	logger.Printf("leader id:%s\n", rf.id)
 	logger.Printf("leader term: %d\n", rf.currentTerm)
 }
 
 /*
 *****************************
-*	    Persistence			*
+*        Persistence        *
 *****************************
  */
 
@@ -193,7 +197,7 @@ func (rf *Raft) readPersist(data []byte) {
 
 /*
 ****************************
-*	   Request Vote		   *
+*       Request Vote       *
 ****************************
  */
 
@@ -285,7 +289,7 @@ func (rf *Raft) handleVoteResponse(res RequestVoteResponse, voteCh chan<- struct
 
 /*
 *****************************
-*	   Append Entries		*
+*      Append Entries       *
 *****************************
  */
 
@@ -335,6 +339,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	log.Printf("server %s recieves request: %v", rf.id, req)
 	// return receiver's currentTerm for candidate to update itself.
 	res.Term = rf.currentTerm
 
@@ -349,21 +354,24 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 		rf.leader = req.LeaderId
 	}
 
-	// reply false if receiver's log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm.
-	entry := rf.log.Entry(req.PrevLogIndex)
-	if entry == nil || entry.Term != req.PrevLogTerm {
-		//res.ConflictIndex, res.ConflictTerm = rf.log.SearchConflict(req.PrevLogIndex, req.PrevLogTerm)
-		return
+	if !(rf.log.lastIncludedIndex == req.PrevLogIndex && rf.log.lastIncludedTerm == req.PrevLogTerm) {
+		// reply false if receiver's log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm.
+		entry := rf.log.Entry(req.PrevLogIndex)
+		if entry == nil || entry.Term != req.PrevLogTerm {
+			//res.ConflictIndex, res.ConflictTerm = rf.log.SearchConflict(req.PrevLogIndex, req.PrevLogTerm)
+			return
+		}
 	}
 
 	// now receiver can reply true since entry matches successfully.
 	res.Success = true
 
+	logger.Printf("last index of server %v: %v", rf.id, rf.log.LastIndex())
 	// if the last log entry matches prevLogIndex and prevLogTerm
 	if rf.log.LastIndex() == req.PrevLogIndex {
 		rf.log.entries = append(rf.log.entries, req.Entries...)
 	} else {
-		storageIndex := req.PrevLogIndex - rf.log.lastIncludedIndex - 1
+		storageIndex := req.PrevLogIndex - rf.log.lastIncludedIndex
 		rf.log.entries = rf.log.entries[:storageIndex]
 		rf.log.entries = append(rf.log.entries, req.Entries...)
 	}
@@ -371,8 +379,13 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	if rf.commitIndex < req.LeaderCommit {
 		rf.commitIndex = min(req.LeaderCommit, rf.log.LastIndex())
 	}
-	res.Index = req.Entries[len(req.Entries)-1].Index
 
+	// not a heartbeat
+	if req.Entries != nil {
+		res.Index = req.Entries[len(req.Entries)-1].Index
+	}
+
+	go rf.apply()
 	rf.persist()
 }
 
@@ -386,10 +399,30 @@ func (rf *Raft) handleAppendEntriesResponse(server int, res AppendEntriesRespons
 	}
 
 	if res.Success {
-		rf.nextIndex[server] = res.Index + 1
-		rf.matchIndex[server] = res.Index
+		if res.Index != 0 {
+			rf.nextIndex[server] = res.Index + 1
+			rf.matchIndex[server] = res.Index
+		}
 	} else {
 		rf.nextIndex[server]--
+	}
+
+	logger.Printf("next index of server %v will be: %v", rf.id, rf.nextIndex[server])
+
+	nextEntry := rf.log.Entry(rf.commitIndex + 1)
+	if nextEntry != nil {
+		// update leader's commitIndex
+		var counter int
+		for i := range rf.matchIndex {
+			if rf.matchIndex[i] >= rf.commitIndex+1 {
+				counter++
+			}
+		}
+		if counter > len(rf.peers)/2 && nextEntry.Term == rf.currentTerm {
+			rf.commitIndex++
+			applyMsg := rf.log.Apply(rf.commitIndex)
+			rf.applyCh <- applyMsg
+		}
 	}
 }
 
@@ -434,7 +467,7 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, res
 
 /*
 *****************************
-*	       Event			*
+*           Event           *
 *****************************
  */
 
@@ -464,9 +497,25 @@ func (rf *Raft) broadcast() {
 	}
 }
 
+func (rf *Raft) apply() {
+	rf.mu.Lock()
+	var applyMsg []ApplyMsg
+	for rf.lastApplied < rf.commitIndex {
+		rf.lastApplied++
+		apply := rf.log.Apply(rf.lastApplied)
+		applyMsg = append(applyMsg, apply)
+	}
+	rf.mu.Unlock()
+
+	//logger.Printf("apply message of server %v: %v", rf.id, applyMsg)
+	for _, msg := range applyMsg {
+		rf.applyCh <- msg
+	}
+}
+
 /*
 *****************************
-*	     State Loop			*
+*        State Loop         *
 *****************************
  */
 
@@ -553,13 +602,20 @@ func (rf *Raft) leaderLoop() {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	return index, int(rf.currentTerm), rf.state == leader
+	index := rf.log.LastIndex()
+	term := rf.currentTerm
+	isLeader := rf.state == leader
+
+	if isLeader {
+		rf.log.AddEntry(rf.currentTerm, command)
+		rf.nextIndex[rf.me] = index + 1
+		rf.matchIndex[rf.me] = index
+	}
+	return int(index) + 1, int(term), isLeader
 }
 
 //
@@ -597,8 +653,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = NewLog()
 	rf.resetCh = make(chan struct{})
 
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	rf.electionTimeout = time.Millisecond * time.Duration(400+r.Intn(200))
+	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rf.electionTimeout = time.Millisecond * time.Duration(400+rand.Intn(200))
 
 	go func() {
 		for {
