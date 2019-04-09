@@ -339,7 +339,8 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	log.Printf("server %s recieves request: %v", rf.id, req)
+	logger.Printf("server %s recieves request: %v", rf.id, req)
+
 	// return receiver's currentTerm for candidate to update itself.
 	res.Term = rf.currentTerm
 
@@ -366,7 +367,8 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	// now receiver can reply true since entry matches successfully.
 	res.Success = true
 
-	logger.Printf("last index of server %v: %v", rf.id, rf.log.LastIndex())
+	//logger.Printf("last index of server %v: %v", rf.id, rf.log.LastIndex())
+
 	// if the last log entry matches prevLogIndex and prevLogTerm
 	if rf.log.LastIndex() == req.PrevLogIndex {
 		rf.log.entries = append(rf.log.entries, req.Entries...)
@@ -407,23 +409,23 @@ func (rf *Raft) handleAppendEntriesResponse(server int, res AppendEntriesRespons
 		rf.nextIndex[server]--
 	}
 
-	logger.Printf("next index of server %v will be: %v", rf.id, rf.nextIndex[server])
+	//logger.Printf("next index of server %v will be: %v", server, rf.nextIndex[server])
 
-	nextEntry := rf.log.Entry(rf.commitIndex + 1)
-	if nextEntry != nil {
-		// update leader's commitIndex
-		var counter int
+	nextEntry := new(LogEntry)
+	for index := rf.commitIndex + 1; nextEntry != nil; index++ {
+		nextEntry = rf.log.Entry(index)
+		counter := 1
 		for i := range rf.matchIndex {
-			if rf.matchIndex[i] >= rf.commitIndex+1 {
+			if rf.matchIndex[i] >= index {
 				counter++
 			}
 		}
 		if counter > len(rf.peers)/2 && nextEntry.Term == rf.currentTerm {
-			rf.commitIndex++
-			applyMsg := rf.log.Apply(rf.commitIndex)
-			rf.applyCh <- applyMsg
+			rf.commitIndex = index
+			go rf.apply()
 		}
 	}
+	//logger.Printf("commit index is %v", rf.commitIndex)
 }
 
 //
@@ -507,7 +509,7 @@ func (rf *Raft) apply() {
 	}
 	rf.mu.Unlock()
 
-	//logger.Printf("apply message of server %v: %v", rf.id, applyMsg)
+	logger.Printf("apply message of server %v: %v", rf.id, applyMsg)
 	for _, msg := range applyMsg {
 		rf.applyCh <- msg
 	}
