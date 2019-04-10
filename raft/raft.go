@@ -19,7 +19,6 @@ package raft
 
 import (
 	"github.com/Fallensouls/raft/labrpc"
-	"log"
 	"math/rand"
 	"sync"
 	"time"
@@ -44,6 +43,7 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 }
+
 type State uint8
 
 const (
@@ -118,7 +118,6 @@ func (rf *Raft) convertToFollower(term uint64) {
 	rf.currentTerm = term
 	rf.state = follower
 	rf.votedFor = ``
-	rf.resetCh <- struct{}{}
 
 	//logger.Printf("follower id:%s\n", rf.id)
 	//logger.Printf("follower term: %d\n", rf.currentTerm)
@@ -145,10 +144,9 @@ func (rf *Raft) convertToLeader() {
 
 	// add a no-op entry to local log.
 	//rf.log.AddNoOpEntry(rf.currentTerm)
-	log.Println(rf.log.entries)
 
-	logger.Printf("leader id:%s\n", rf.id)
-	logger.Printf("leader term: %d\n", rf.currentTerm)
+	//logger.Printf("leader id:%s\n", rf.id)
+	//logger.Printf("leader term: %d\n", rf.currentTerm)
 }
 
 /*
@@ -265,9 +263,10 @@ func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
 	}
 	// if receiver is not a candidate and upToDate is true, the candidate will receive a vote.
 	if rf.votedFor == `` && upToDate {
-		log.Printf("%s voted for: %s", rf.id, req.CandidateId)
+		//log.Printf("%s voted for: %s", rf.id, req.CandidateId)
 		rf.votedFor = req.CandidateId
 		res.VoteGranted = true
+		rf.resetCh <- struct{}{}
 	}
 
 	// persistent state should be persisted before responding to RPCs.
@@ -317,11 +316,9 @@ func (rf *Raft) NewAppendEntriesRequest(server int) *AppendEntriesRequest {
 	defer rf.mu.Unlock()
 
 	prevLogIndex := rf.nextIndex[server] - 1
-	entry := rf.log.Entry(rf.nextIndex[server] - 1)
+	entry := rf.log.Entry(prevLogIndex)
 	var prevLogTerm uint64
-	if entry == nil {
-		prevLogTerm = 0
-	} else {
+	if entry != nil {
 		prevLogTerm = entry.Term
 	}
 
@@ -339,7 +336,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	logger.Printf("server %s recieves request: %v", rf.id, req)
+	//logger.Printf("server %s recieves request: %v", rf.id, req)
 
 	// return receiver's currentTerm for candidate to update itself.
 	res.Term = rf.currentTerm
@@ -353,6 +350,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	if rf.currentTerm <= req.Term {
 		rf.convertToFollower(req.Term)
 		rf.leader = req.LeaderId
+		rf.resetCh <- struct{}{}
 	}
 
 	if !(rf.log.lastIncludedIndex == req.PrevLogIndex && rf.log.lastIncludedTerm == req.PrevLogTerm) {
@@ -397,6 +395,7 @@ func (rf *Raft) handleAppendEntriesResponse(server int, res AppendEntriesRespons
 
 	if rf.currentTerm < res.Term {
 		rf.convertToFollower(res.Term)
+		rf.resetCh <- struct{}{}
 		return
 	}
 
@@ -414,7 +413,7 @@ func (rf *Raft) handleAppendEntriesResponse(server int, res AppendEntriesRespons
 	nextEntry := new(LogEntry)
 	for index := rf.commitIndex + 1; nextEntry != nil; index++ {
 		nextEntry = rf.log.Entry(index)
-		counter := 1
+		counter := 0
 		for i := range rf.matchIndex {
 			if rf.matchIndex[i] >= index {
 				counter++
@@ -509,7 +508,7 @@ func (rf *Raft) apply() {
 	}
 	rf.mu.Unlock()
 
-	logger.Printf("apply message of server %v: %v", rf.id, applyMsg)
+	//logger.Printf("apply message of server %v: %v", rf.id, applyMsg)
 	for _, msg := range applyMsg {
 		rf.applyCh <- msg
 	}
@@ -608,7 +607,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	index := rf.log.LastIndex()
+	index := rf.log.LastIndex() + 1
 	term := rf.currentTerm
 	isLeader := rf.state == leader
 
@@ -617,7 +616,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.nextIndex[rf.me] = index + 1
 		rf.matchIndex[rf.me] = index
 	}
-	return int(index) + 1, int(term), isLeader
+	return int(index), int(term), isLeader
 }
 
 //
