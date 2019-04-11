@@ -44,3 +44,17 @@ func RandomID(l int) string {
 	}
 	return string(result)
 }
+
+type UintSlice []uint64
+
+func (u UintSlice) Len() int {
+	return len(u)
+}
+
+func (u UintSlice) Less(i, j int) bool {
+	return u[i] < u[j]
+}
+
+func (u UintSlice) Swap(i, j int) {
+	u[i], u[j] = u[j], u[i]
+}

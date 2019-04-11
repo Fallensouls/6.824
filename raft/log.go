@@ -7,36 +7,36 @@ type LogEntry struct {
 }
 
 type Log struct {
-	entries           []LogEntry
-	lastIncludedIndex uint64
-	lastIncludedTerm  uint64
+	Entries           []LogEntry
+	LastIncludedIndex uint64
+	LastIncludedTerm  uint64
 }
 
 func NewLog() *Log {
-	return &Log{entries: make([]LogEntry, 0)}
+	return &Log{Entries: make([]LogEntry, 0)}
 }
 
-func (l *Log) LastIncludedTerm() uint64 {
-	return l.lastIncludedTerm
+func (l *Log) GetLastIncludedTerm() uint64 {
+	return l.LastIncludedTerm
 }
 
-func (l *Log) LastIncludedIndex() uint64 {
-	return l.lastIncludedIndex
+func (l *Log) GetLastIncludedIndex() uint64 {
+	return l.LastIncludedIndex
 }
 
 func (l *Log) AddEntry(term uint64, command interface{}) {
 	index := l.LastIndex() + 1
-	l.entries = append(l.entries, LogEntry{index, term, command})
+	l.Entries = append(l.Entries, LogEntry{index, term, command})
 }
 
 func (l *Log) AddNoOpEntry(term uint64) {
 	index := l.LastIndex() + 1
-	l.entries = append(l.entries, LogEntry{index, term, nil})
+	l.Entries = append(l.Entries, LogEntry{index, term, nil})
 }
 
 func (l *Log) LastLog() *LogEntry {
-	if l != nil && len(l.entries) > 0 {
-		return &l.entries[len(l.entries)-1]
+	if l != nil && len(l.Entries) > 0 {
+		return &l.Entries[len(l.Entries)-1]
 	}
 	return nil
 }
@@ -58,30 +58,30 @@ func (l *Log) LastIndex() uint64 {
 }
 
 func (l *Log) Entry(index uint64) *LogEntry {
-	if index <= l.lastIncludedIndex || l.LastIndex() < index {
+	if index <= l.LastIncludedIndex || l.LastIndex() < index {
 		return nil
 	}
-	storageIndex := index - l.lastIncludedIndex - 1
-	return &l.entries[storageIndex]
+	storageIndex := index - l.LastIncludedIndex - 1
+	return &l.Entries[storageIndex]
 }
 
 func (l *Log) EntriesAfter(index uint64) []LogEntry {
-	if index < l.lastIncludedIndex || l.LastIndex() < index {
+	if index < l.LastIncludedIndex || l.LastIndex() < index {
 		return nil
 	}
 
-	if index == l.lastIncludedIndex {
-		return l.entries
+	if index == l.LastIncludedIndex {
+		return l.Entries
 	}
 
-	storageIndex := index - l.lastIncludedIndex
-	return l.entries[storageIndex:]
+	storageIndex := index - l.LastIncludedIndex
+	return l.Entries[storageIndex:]
 }
 
 func (l *Log) Apply(index uint64) ApplyMsg {
 	command := l.Entry(index).Command
 	if command == nil {
-		command = 0
+		command = 1
 	}
 	applyMsg := ApplyMsg{
 		CommandValid: true,
@@ -91,14 +91,13 @@ func (l *Log) Apply(index uint64) ApplyMsg {
 	return applyMsg
 }
 
-func (l *Log) SearchConflict(index, term uint64) (conflictIndex, conflictTerm uint64) {
-	storageIndex := index - l.lastIncludedIndex - 1
+func (l *Log) SearchFirstIndex(index, term uint64) (firstIndex uint64) {
+	storageIndex := int(index - l.LastIncludedIndex - 1)
 	for i := storageIndex; i >= 0; i-- {
-		if l.entries[i].Index == index && l.entries[i].Term == term {
-			conflictIndex = l.entries[i].Index
-			conflictTerm = l.entries[i].Term
+		if l.Entries[i].Term < term {
+			firstIndex = l.Entries[i].Index + 1
 			return
 		}
 	}
-	return l.lastIncludedIndex, l.lastIncludedTerm
+	return 1
 }

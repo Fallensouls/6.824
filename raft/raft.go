@@ -18,8 +18,11 @@ package raft
 //
 
 import (
+	"bytes"
+	"github.com/Fallensouls/raft/labgob"
 	"github.com/Fallensouls/raft/labrpc"
 	"math/rand"
+	"sort"
 	"sync"
 	"time"
 )
@@ -28,7 +31,7 @@ import (
 // import "labgob"
 
 //
-// as each Raft peer becomes aware that successive log entries are
+// as each Raft peer becomes aware that successive log Entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
@@ -53,6 +56,7 @@ const (
 )
 
 const HeartBeatInterval = 50 * time.Millisecond // 50mS
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -124,25 +128,38 @@ func (rf *Raft) convertToFollower(term uint64) {
 }
 
 func (rf *Raft) convertToCandidate() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.currentTerm += 1
 	rf.state = candidate
 	rf.votedFor = rf.id
-
+	//rf.mu.Unlock()
 	//logger.Printf("candidate id:%s\n", rf.id)
 	//logger.Printf("candidate term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToLeader() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	rf.state = leader
 	rf.votedFor = ``
 	rf.nextIndex = make([]uint64, len(rf.peers))
 	rf.matchIndex = make([]uint64, len(rf.peers))
 
+	index := rf.log.LastIndex() + 1
+	rf.log.AddEntry(rf.currentTerm, nil)
+	rf.nextIndex[rf.me] = index + 1
+	rf.matchIndex[rf.me] = index
+	rf.persist()
+
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = rf.log.LastIndex() + 1
 	}
 
+	//rf.mu.Unlock()
 	// add a no-op entry to local log.
+	//go rf.Start(nil)
 	//rf.log.AddNoOpEntry(rf.currentTerm)
 
 	//logger.Printf("leader id:%s\n", rf.id)
@@ -163,12 +180,13 @@ func (rf *Raft) convertToLeader() {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:`
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -180,17 +198,13 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(rf.log)
+
 }
 
 /*
@@ -297,7 +311,7 @@ type AppendEntriesRequest struct {
 	LeaderId     string     // leader's id
 	PrevLogIndex uint64     // index of log entry immediately preceding new ones
 	PrevLogTerm  uint64     // term of prevLogIndex entry
-	Entries      []LogEntry // log entries to store
+	Entries      []LogEntry // log Entries to store
 	LeaderCommit uint64     // leader's commitIndex
 }
 
@@ -307,8 +321,8 @@ type AppendEntriesResponse struct {
 	Index   uint64 // the index to be used for updating nextIndex and matchIndex
 
 	// extra information for conflicts
-	ConflictIndex uint64
-	ConflictTerm  uint64
+	FirstIndex   uint64
+	ConflictTerm uint64
 }
 
 func (rf *Raft) NewAppendEntriesRequest(server int) *AppendEntriesRequest {
@@ -336,7 +350,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//logger.Printf("server %s recieves request: %v", rf.id, req)
+	logger.Printf("server %s recieves request: %v", rf.id, req)
 
 	// return receiver's currentTerm for candidate to update itself.
 	res.Term = rf.currentTerm
@@ -353,11 +367,18 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 		rf.resetCh <- struct{}{}
 	}
 
-	if !(rf.log.lastIncludedIndex == req.PrevLogIndex && rf.log.lastIncludedTerm == req.PrevLogTerm) {
+	if !(rf.log.LastIncludedIndex == req.PrevLogIndex && rf.log.LastIncludedTerm == req.PrevLogTerm) {
 		// reply false if receiver's log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm.
 		entry := rf.log.Entry(req.PrevLogIndex)
-		if entry == nil || entry.Term != req.PrevLogTerm {
-			//res.ConflictIndex, res.ConflictTerm = rf.log.SearchConflict(req.PrevLogIndex, req.PrevLogTerm)
+		if entry == nil {
+			// leader has more logs, let nextIndex be the last index of receiver.
+			res.FirstIndex = rf.log.LastIndex() + 1
+			return
+		}
+		if entry.Term != req.PrevLogTerm {
+			// there are conflicting entries
+			res.FirstIndex = rf.log.SearchFirstIndex(req.PrevLogIndex, entry.Term)
+			res.ConflictTerm = entry.Term
 			return
 		}
 	}
@@ -369,11 +390,11 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 
 	// if the last log entry matches prevLogIndex and prevLogTerm
 	if rf.log.LastIndex() == req.PrevLogIndex {
-		rf.log.entries = append(rf.log.entries, req.Entries...)
+		rf.log.Entries = append(rf.log.Entries, req.Entries...)
 	} else {
-		storageIndex := req.PrevLogIndex - rf.log.lastIncludedIndex
-		rf.log.entries = rf.log.entries[:storageIndex]
-		rf.log.entries = append(rf.log.entries, req.Entries...)
+		storageIndex := req.PrevLogIndex - rf.log.LastIncludedIndex
+		rf.log.Entries = rf.log.Entries[:storageIndex]
+		rf.log.Entries = append(rf.log.Entries, req.Entries...)
 	}
 
 	if rf.commitIndex < req.LeaderCommit {
@@ -385,6 +406,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 		res.Index = req.Entries[len(req.Entries)-1].Index
 	}
 
+	//logger.Printf("commit index of server %v: %v", rf.id, rf.commitIndex)
 	go rf.apply()
 	rf.persist()
 }
@@ -405,26 +427,10 @@ func (rf *Raft) handleAppendEntriesResponse(server int, res AppendEntriesRespons
 			rf.matchIndex[server] = res.Index
 		}
 	} else {
-		rf.nextIndex[server]--
+		rf.nextIndex[server] = res.FirstIndex
 	}
 
-	//logger.Printf("next index of server %v will be: %v", server, rf.nextIndex[server])
-
-	nextEntry := new(LogEntry)
-	for index := rf.commitIndex + 1; nextEntry != nil; index++ {
-		nextEntry = rf.log.Entry(index)
-		counter := 0
-		for i := range rf.matchIndex {
-			if rf.matchIndex[i] >= index {
-				counter++
-			}
-		}
-		if counter > len(rf.peers)/2 && nextEntry.Term == rf.currentTerm {
-			rf.commitIndex = index
-			go rf.apply()
-		}
-	}
-	//logger.Printf("commit index is %v", rf.commitIndex)
+	go rf.updateCommitIndex()
 }
 
 //
@@ -498,6 +504,23 @@ func (rf *Raft) broadcast() {
 	}
 }
 
+func (rf *Raft) updateCommitIndex() {
+	rf.mu.Lock()
+
+	sorted := make([]uint64, len(rf.matchIndex))
+	copy(sorted, rf.matchIndex)
+	sort.Sort(UintSlice(sorted))
+
+	index := sorted[len(sorted)/2]
+	if rf.commitIndex < index && rf.log.Entry(index).Term == rf.currentTerm {
+		rf.commitIndex = index
+		go rf.apply()
+	}
+	logger.Printf("commit index of leader: %v", rf.commitIndex)
+	logger.Printf("entries of leader: %v", rf.log.Entries)
+	rf.mu.Unlock()
+}
+
 func (rf *Raft) apply() {
 	rf.mu.Lock()
 	var applyMsg []ApplyMsg
@@ -528,9 +551,9 @@ func (rf *Raft) followerLoop() {
 	for {
 		select {
 		case <-electionTimer.C:
-			rf.mu.Lock()
+			//rf.mu.Lock()
 			rf.convertToCandidate()
-			rf.mu.Unlock()
+			//rf.mu.Unlock()
 			return
 		case <-rf.resetCh:
 			if !electionTimer.Stop() {
@@ -558,15 +581,11 @@ func (rf *Raft) candidateLoop() {
 			votes++
 			//logger.Printf("votes: %d\n", votes)
 			if votes > len(rf.peers)/2 {
-				rf.mu.Lock()
 				rf.convertToLeader()
-				rf.mu.Unlock()
 				return
 			}
 		case <-electionTicker.C:
-			rf.mu.Lock()
 			rf.convertToCandidate()
-			rf.mu.Unlock()
 			return
 		case <-rf.resetCh:
 			return
@@ -615,7 +634,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log.AddEntry(rf.currentTerm, command)
 		rf.nextIndex[rf.me] = index + 1
 		rf.matchIndex[rf.me] = index
+		rf.persist()
 	}
+
 	return int(index), int(term), isLeader
 }
 
