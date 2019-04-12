@@ -129,24 +129,25 @@ func (rf *Raft) convertToFollower(term uint64) {
 
 func (rf *Raft) convertToCandidate() {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+
 	rf.currentTerm += 1
 	rf.state = candidate
 	rf.votedFor = rf.id
-	//rf.mu.Unlock()
+
+	rf.mu.Unlock()
 	//logger.Printf("candidate id:%s\n", rf.id)
 	//logger.Printf("candidate term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToLeader() {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	rf.state = leader
 	rf.votedFor = ``
 	rf.nextIndex = make([]uint64, len(rf.peers))
 	rf.matchIndex = make([]uint64, len(rf.peers))
 
+	// add a no-op entry to local log.
 	index := rf.log.LastIndex() + 1
 	rf.log.AddEntry(rf.currentTerm, nil)
 	rf.nextIndex[rf.me] = index + 1
@@ -157,11 +158,7 @@ func (rf *Raft) convertToLeader() {
 		rf.nextIndex[i] = rf.log.LastIndex() + 1
 	}
 
-	//rf.mu.Unlock()
-	// add a no-op entry to local log.
-	//go rf.Start(nil)
-	//rf.log.AddNoOpEntry(rf.currentTerm)
-
+	rf.mu.Unlock()
 	//logger.Printf("leader id:%s\n", rf.id)
 	//logger.Printf("leader term: %d\n", rf.currentTerm)
 }
@@ -263,6 +260,10 @@ func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
 		return
 	}
 
+	var reset bool
+	if rf.state == leader {
+		reset = true
+	}
 	// If receiver's currentTerm is less than candidate's term,
 	// receiver should update itself and convert to follower.
 	rf.convertToFollower(req.Term)
@@ -281,6 +282,10 @@ func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
 		rf.votedFor = req.CandidateId
 		res.VoteGranted = true
 		rf.resetCh <- struct{}{}
+	} else {
+		if reset {
+			rf.resetCh <- struct{}{}
+		}
 	}
 
 	// persistent state should be persisted before responding to RPCs.
@@ -350,7 +355,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	logger.Printf("server %s recieves request: %v", rf.id, req)
+	//logger.Printf("server %s recieves request: %v", rf.id, req)
 
 	// return receiver's currentTerm for candidate to update itself.
 	res.Term = rf.currentTerm
@@ -516,8 +521,8 @@ func (rf *Raft) updateCommitIndex() {
 		rf.commitIndex = index
 		go rf.apply()
 	}
-	logger.Printf("commit index of leader: %v", rf.commitIndex)
-	logger.Printf("entries of leader: %v", rf.log.Entries)
+	//logger.Printf("commit index of leader: %v", rf.commitIndex)
+	//logger.Printf("entries of leader: %v", rf.log.Entries)
 	rf.mu.Unlock()
 }
 
@@ -551,9 +556,7 @@ func (rf *Raft) followerLoop() {
 	for {
 		select {
 		case <-electionTimer.C:
-			//rf.mu.Lock()
 			rf.convertToCandidate()
-			//rf.mu.Unlock()
 			return
 		case <-rf.resetCh:
 			if !electionTimer.Stop() {
@@ -579,7 +582,6 @@ func (rf *Raft) candidateLoop() {
 		select {
 		case <-voteCh:
 			votes++
-			//logger.Printf("votes: %d\n", votes)
 			if votes > len(rf.peers)/2 {
 				rf.convertToLeader()
 				return
