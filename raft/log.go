@@ -80,13 +80,16 @@ func (l *Log) EntriesAfter(index uint64) []LogEntry {
 
 func (l *Log) Apply(index uint64) ApplyMsg {
 	command := l.Entry(index).Command
+	var noop bool
 	if command == nil {
 		command = 1
+		noop = true
 	}
 	applyMsg := ApplyMsg{
 		CommandValid: true,
 		CommandIndex: int(index),
 		Command:      command,
+		NoOpCommand:  noop,
 	}
 	return applyMsg
 }

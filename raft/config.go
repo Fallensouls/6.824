@@ -12,7 +12,6 @@ import (
 	crand "crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"github.com/Fallensouls/raft/labrpc"
 	"log"
 	"math/big"
 	"math/rand"
@@ -20,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Fallensouls/raft/labrpc"
 )
 
 func randstring(n int) string {
@@ -295,7 +296,7 @@ func (cfg *config) setlongreordering(longrel bool) {
 	cfg.net.LongReordering(longrel)
 }
 
-// check that there's exactly one leader.
+// check that there's exactly one Leader.
 // try a few times in case re-elections are needed.
 func (cfg *config) checkOneLeader() int {
 	for iters := 0; iters < 10; iters++ {
@@ -325,7 +326,7 @@ func (cfg *config) checkOneLeader() int {
 			return leaders[lastTermWithLeader][0]
 		}
 	}
-	cfg.t.Fatalf("expected one leader, got none")
+	cfg.t.Fatalf("expected one Leader, got none")
 	return -1
 }
 
@@ -345,13 +346,13 @@ func (cfg *config) checkTerms() int {
 	return term
 }
 
-// check that there's no leader
+// check that there's no Leader
 func (cfg *config) checkNoLeader() {
 	for i := 0; i < cfg.n; i++ {
 		if cfg.connected[i] {
 			_, is_leader := cfg.rafts[i].GetState()
 			if is_leader {
-				cfg.t.Fatalf("expected no leader, but %v claims to be leader", i)
+				cfg.t.Fatalf("expected no Leader, but %v claims to be Leader", i)
 			}
 		}
 	}
@@ -414,7 +415,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 }
 
 // do a complete agreement.
-// it might choose the wrong leader initially,
+// it might choose the wrong Leader initially,
 // and have to re-submit after giving up.
 // entirely gives up after about 10 seconds.
 // indirectly checks that the servers agree on the
@@ -422,14 +423,14 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // as do the threads that read from applyCh.
 // returns index.
 // if retry==true, may submit the command multiple
-// times, in case a leader fails just after Start().
+// times, in case a Leader fails just after Start().
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
 func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	starts := 0
 	for time.Since(t0).Seconds() < 10 {
-		// try all the servers, maybe one is the leader.
+		// try all the servers, maybe one is the Leader.
 		index := -1
 		for si := 0; si < cfg.n; si++ {
 			starts = (starts + 1) % cfg.n
@@ -449,7 +450,7 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 		}
 
 		if index != -1 {
-			// somebody claimed to be the leader and to have
+			// somebody claimed to be the Leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
