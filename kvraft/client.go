@@ -12,8 +12,9 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-
-	lastLeader int // server turned out to be the leader for the last rpc
+	id         string // id of the client
+	seq        uint64 // serial number to latest command
+	lastLeader int    // server turned out to be the leader for the last rpc
 }
 
 func nrand() int64 {
@@ -26,7 +27,8 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	ck.id = raft.RandomID(8)
+	ck.seq = 1
 	return ck
 }
 
@@ -70,7 +72,7 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	//log.Printf("value in client: %v", value)
-	req := PutAppendRequest{Key: key, Value: value, Op: op, ID: raft.RandomID(12)}
+	req := PutAppendRequest{Key: key, Value: value, Op: op, ID: ck.id, Seq: ck.seq}
 	for {
 		var res PutAppendResponse
 		ok := ck.servers[ck.lastLeader].Call("KVServer.PutAppend", &req, &res)
@@ -84,6 +86,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		if res.Err == ErrTimeout {
 			continue
 		}
+		ck.seq++
 	}
 }
 

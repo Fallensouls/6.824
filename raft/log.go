@@ -58,6 +58,7 @@ func (l *Log) LastIndex() uint64 {
 }
 
 func (l *Log) Entry(index uint64) *LogEntry {
+	//log.Printf("last index: %v, index: %v", l.LastIndex(), index)
 	if index <= l.LastIncludedIndex || l.LastIndex() < index {
 		return nil
 	}

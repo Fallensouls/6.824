@@ -72,7 +72,7 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	id     string
+	ID     string
 	state  State
 	leader string
 
@@ -125,7 +125,7 @@ func (rf *Raft) convertToFollower(term uint64) {
 	rf.state = Follower
 	rf.votedFor = ``
 
-	//logger.Printf("Follower id:%s\n", rf.id)
+	//logger.Printf("Follower ID:%s\n", rf.ID)
 	//logger.Printf("Follower term: %d\n", rf.currentTerm)
 }
 
@@ -134,10 +134,10 @@ func (rf *Raft) convertToCandidate() {
 
 	rf.currentTerm += 1
 	rf.state = Candidate
-	rf.votedFor = rf.id
+	rf.votedFor = rf.ID
 
 	rf.mu.Unlock()
-	//logger.Printf("Candidate id:%s\n", rf.id)
+	//logger.Printf("Candidate ID:%s\n", rf.ID)
 	//logger.Printf("Candidate term: %d\n", rf.currentTerm)
 }
 
@@ -161,7 +161,7 @@ func (rf *Raft) convertToLeader() {
 	}
 
 	rf.mu.Unlock()
-	//logger.Printf("Leader id:%s\n", rf.id)
+	//logger.Printf("Leader ID:%s\n", rf.ID)
 	//logger.Printf("Leader term: %d\n", rf.currentTerm)
 }
 
@@ -219,7 +219,7 @@ func (rf *Raft) readPersist(data []byte) {
 type RequestVoteRequest struct {
 	// Your data here (2A, 2B).
 	Term         uint64 // Candidate's term
-	CandidateId  string // Candidate's id
+	CandidateId  string // Candidate's ID
 	LastLogIndex uint64 // index of Candidate's last log entry
 	LastLogTerm  uint64 // term of Candidate's last log entry
 }
@@ -239,7 +239,7 @@ func (rf *Raft) NewVoteRequest() *RequestVoteRequest {
 	defer rf.mu.Unlock()
 	return &RequestVoteRequest{
 		rf.currentTerm,
-		rf.id,
+		rf.ID,
 		rf.log.LastIndex(),
 		rf.log.LastTerm(),
 	}
@@ -280,7 +280,7 @@ func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
 	}
 	// if receiver is not a Candidate and upToDate is true, the Candidate will receive a vote.
 	if rf.votedFor == `` && upToDate {
-		//log.Printf("%s voted for: %s", rf.id, req.CandidateId)
+		//log.Printf("%s voted for: %s", rf.ID, req.CandidateId)
 		rf.votedFor = req.CandidateId
 		res.VoteGranted = true
 		rf.resetCh <- struct{}{}
@@ -315,7 +315,7 @@ func (rf *Raft) handleVoteResponse(res RequestVoteResponse, voteCh chan<- struct
 
 type AppendEntriesRequest struct {
 	Term         uint64     // Leader's term
-	LeaderId     string     // Leader's id
+	LeaderId     string     // Leader's ID
 	PrevLogIndex uint64     // index of log entry immediately preceding new ones
 	PrevLogTerm  uint64     // term of prevLogIndex entry
 	Entries      []LogEntry // log Entries to store
@@ -345,7 +345,7 @@ func (rf *Raft) NewAppendEntriesRequest(server int) *AppendEntriesRequest {
 
 	return &AppendEntriesRequest{
 		rf.currentTerm,
-		rf.id,
+		rf.ID,
 		prevLogIndex,
 		prevLogTerm,
 		rf.log.EntriesAfter(prevLogIndex),
@@ -357,7 +357,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//logger.Printf("server %s recieves request: %v", rf.id, req)
+	//logger.Printf("server %s receives request: %v", rf.ID, req)
 
 	// return receiver's currentTerm for Candidate to update itself.
 	res.Term = rf.currentTerm
@@ -393,7 +393,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	// now receiver can reply true since entry matches successfully.
 	res.Success = true
 
-	//logger.Printf("last index of server %v: %v", rf.id, rf.log.LastIndex())
+	//logger.Printf("last index of server %v: %v", rf.ID, rf.log.LastIndex())
 
 	// if the last log entry matches prevLogIndex and prevLogTerm
 	if rf.log.LastIndex() == req.PrevLogIndex {
@@ -413,7 +413,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 		res.Index = req.Entries[len(req.Entries)-1].Index
 	}
 
-	//logger.Printf("commit index of server %v: %v", rf.id, rf.commitIndex)
+	//logger.Printf("commit index of server %v: %v", rf.ID, rf.commitIndex)
 	go rf.apply()
 	rf.persist()
 }
@@ -498,7 +498,7 @@ func (rf *Raft) electLeader(voteCh chan struct{}) {
 	}
 }
 
-func (rf *Raft) Broadcast() {
+func (rf *Raft) broadcast() {
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
@@ -532,13 +532,17 @@ func (rf *Raft) apply() {
 	rf.mu.Lock()
 	var applyMsg []ApplyMsg
 	for rf.lastApplied < rf.commitIndex {
+		//log.Printf("commit index of server %v: %v", rf.ID, rf.commitIndex)
+		//if rf.state == Leader {
+		//log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
+		//}
 		rf.lastApplied++
 		apply := rf.log.Apply(rf.lastApplied)
 		applyMsg = append(applyMsg, apply)
 	}
 	rf.mu.Unlock()
 
-	//logger.Printf("apply message of server %v: %v", rf.id, applyMsg)
+	//logger.Printf("apply message of server %v: %v", rf.ID, applyMsg)
 	for _, msg := range applyMsg {
 		rf.applyCh <- msg
 	}
@@ -604,7 +608,7 @@ func (rf *Raft) leaderLoop() {
 	for {
 		select {
 		case <-heartBeatTicker.C:
-			rf.Broadcast()
+			rf.broadcast()
 		case <-rf.resetCh:
 			return
 		}
@@ -628,8 +632,6 @@ func (rf *Raft) leaderLoop() {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	index := rf.log.LastIndex() + 1
 	term := rf.currentTerm
 	isLeader := rf.state == Leader
@@ -640,7 +642,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = index
 		rf.persist()
 	}
-
+	rf.mu.Unlock()
 	return int(index), int(term), isLeader
 }
 
@@ -674,7 +676,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.id = RandomID(8)
+	rf.ID = RandomID(8)
 	rf.state = Follower
 	rf.log = NewLog()
 	rf.resetCh = make(chan struct{})

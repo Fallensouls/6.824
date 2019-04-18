@@ -27,6 +27,7 @@ type Op struct {
 	Value     string
 	Operation string
 	ID        string
+	Seq       uint64
 }
 
 type KVServer struct {
@@ -40,7 +41,7 @@ type KVServer struct {
 	// Your definitions here.
 	done     chan int
 	db       map[string]string // key-value database
-	executed map[string]bool   // the set of operations which have been executed
+	executed map[string]uint64 // the set of commands which have been executed
 }
 
 func (kv *KVServer) Get(req *GetRequest, res *GetResponse) {
@@ -52,7 +53,7 @@ func (kv *KVServer) Get(req *GetRequest, res *GetResponse) {
 	}
 
 	// ensure that receiver is still the leader.
-	kv.rf.Broadcast()
+	time.Sleep(raft.HeartBeatInterval)
 	if kv.rf.State() != raft.Leader {
 		res.WrongLeader = true
 		return
@@ -67,7 +68,6 @@ func (kv *KVServer) Get(req *GetRequest, res *GetResponse) {
 		res.Err = ErrNoKey
 	}
 	kv.mu.Unlock()
-	//log.Println(res)
 }
 
 func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
@@ -79,14 +79,17 @@ func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 	res.WrongLeader = false
 
 	kv.mu.Lock()
-	_, ok := kv.executed[req.ID]
+	seq, _ := kv.executed[req.ID]
 	kv.mu.Unlock()
-	if ok {
+	if seq >= req.Seq {
 		res.Err = ErrExecuted
 		return
 	}
 
-	index, _, _ := kv.rf.Start(Op{Key: req.Key, Value: req.Value, Operation: req.Op, ID: req.ID})
+	// print all the valid requests.
+	//log.Printf("server %v recieve request: %v", kv.rf.ID, req)
+
+	index, _, _ := kv.rf.Start(Op{Key: req.Key, Value: req.Value, Operation: req.Op, ID: req.ID, Seq: req.Seq})
 	timeout := make(chan struct{})
 	go func() {
 		time.Sleep(time.Second)
@@ -116,10 +119,10 @@ func (kv *KVServer) apply() {
 				switch op.Operation {
 				case "Put":
 					kv.db[op.Key] = op.Value
-					kv.executed[op.ID] = true
+					kv.executed[op.ID] = op.Seq
 				case "Append":
 					kv.db[op.Key] += op.Value
-					kv.executed[op.ID] = true
+					kv.executed[op.ID] = op.Seq
 				default:
 				}
 				if kv.rf.State() == raft.Leader {
@@ -168,7 +171,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.done = make(chan int, 50)
 	kv.db = make(map[string]string)
-	kv.executed = make(map[string]bool)
+	kv.executed = make(map[string]uint64)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 

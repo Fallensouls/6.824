@@ -17,7 +17,8 @@ type PutAppendRequest struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	ID string // id of the request
+	ID  string // id of the client
+	Seq uint64 // unique serial number to this command
 }
 
 type PutAppendResponse struct {
@@ -28,7 +29,7 @@ type PutAppendResponse struct {
 type GetRequest struct {
 	Key string
 	// You'll have to add definitions here.
-	ID string // id of the request
+	ID string // id of the client
 }
 
 type GetResponse struct {
