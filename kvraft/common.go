@@ -1,10 +1,11 @@
 package raftkv
 
 const (
-	OK          = "OK"
-	ErrNoKey    = "ErrNoKey"
-	ErrExecuted = "ErrExecuted"
-	ErrTimeout  = "ErrTimeout"
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey"
+	ErrExecuted    = "ErrExecuted"
+	ErrTimeout     = "ErrTimeout"
+	ErrPartitioned = "ErrPartitioned"
 )
 
 type Err string

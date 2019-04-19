@@ -19,6 +19,7 @@ package raft
 
 import (
 	"bytes"
+	"errors"
 	"math/rand"
 	"sort"
 	"sync"
@@ -353,6 +354,20 @@ func (rf *Raft) NewAppendEntriesRequest(server int) *AppendEntriesRequest {
 	}
 }
 
+func (rf *Raft) NewHeartBeat() *AppendEntriesRequest {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	return &AppendEntriesRequest{
+		rf.currentTerm,
+		rf.ID,
+		0,
+		1,
+		nil,
+		0,
+	}
+}
+
 func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesResponse) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -511,6 +526,34 @@ func (rf *Raft) broadcast() {
 	}
 }
 
+func (rf *Raft) HeartBeat() error {
+	res := make(chan struct{}, len(rf.peers)-1)
+	for i := range rf.peers {
+		if i != rf.me {
+			go func(server int) {
+				var response AppendEntriesResponse
+				if rf.sendAppendEntries(server, rf.NewHeartBeat(), &response) {
+					res <- struct{}{}
+				}
+			}(i)
+		}
+	}
+	j := 1
+	timeout := time.NewTimer(100 * time.Millisecond)
+	for {
+		select {
+		case <-res:
+			j++
+			if j > len(rf.peers)/2 {
+				return nil
+			}
+		case <-timeout.C:
+			timeout.Stop()
+			return errors.New("leader can't exchange heartbeat with a majority of the cluster")
+		}
+	}
+}
+
 func (rf *Raft) updateCommitIndex() {
 	rf.mu.Lock()
 
@@ -562,6 +605,7 @@ func (rf *Raft) followerLoop() {
 	for {
 		select {
 		case <-electionTimer.C:
+			electionTimer.Stop()
 			rf.convertToCandidate()
 			return
 		case <-rf.resetCh:
@@ -584,21 +628,23 @@ func (rf *Raft) candidateLoop() {
 	electionTicker := time.NewTicker(rf.electionTimeout)
 	rf.electLeader(voteCh)
 
+Loop:
 	for {
 		select {
 		case <-voteCh:
 			votes++
 			if votes > len(rf.peers)/2 {
 				rf.convertToLeader()
-				return
+				break Loop
 			}
 		case <-electionTicker.C:
 			rf.convertToCandidate()
-			return
+			break Loop
 		case <-rf.resetCh:
-			return
+			break Loop
 		}
 	}
+	electionTicker.Stop()
 }
 
 // LeaderLoop is loop of Leader.
@@ -610,6 +656,7 @@ func (rf *Raft) leaderLoop() {
 		case <-heartBeatTicker.C:
 			rf.broadcast()
 		case <-rf.resetCh:
+			heartBeatTicker.Stop()
 			return
 		}
 	}

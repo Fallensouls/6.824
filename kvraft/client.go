@@ -2,6 +2,7 @@ package raftkv
 
 import (
 	"crypto/rand"
+	"log"
 	"math/big"
 
 	"github.com/Fallensouls/raft/raft"
@@ -56,6 +57,9 @@ func (ck *Clerk) Get(key string) string {
 			//log.Println(res)
 			continue
 		}
+		if res.Err == ErrPartitioned {
+			continue
+		}
 		return res.Value
 	}
 }
@@ -71,8 +75,8 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	//log.Printf("value in client: %v", value)
 	req := PutAppendRequest{Key: key, Value: value, Op: op, ID: ck.id, Seq: ck.seq}
+	log.Printf("request: %v", req)
 	for {
 		var res PutAppendResponse
 		ok := ck.servers[ck.lastLeader].Call("KVServer.PutAppend", &req, &res)
@@ -83,11 +87,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		if res.Err == ErrExecuted {
 			break
 		}
-		if res.Err == ErrTimeout {
+		if res.Err != OK {
 			continue
 		}
-		ck.seq++
 	}
+	ck.seq++
 }
 
 func (ck *Clerk) Put(key string, value string) {
