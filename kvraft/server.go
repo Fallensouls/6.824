@@ -113,8 +113,12 @@ func (kv *KVServer) apply() {
 		case msg, ok := <-kv.applyCh:
 			if ok && !msg.NoOpCommand {
 				op := msg.Command.(Op)
-				//log.Printf("value in server: %v", op.Value)
 				kv.mu.Lock()
+				seq, _ := kv.executed[op.ID]
+				if seq >= op.Seq {
+					kv.mu.Unlock()
+					break
+				}
 				switch op.Operation {
 				case "Put":
 					kv.db[op.Key] = op.Value
