@@ -91,19 +91,22 @@ func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 	}
 
 	// print all the valid requests.
-	log.Printf("server %v recieve request: %v", kv.rf.ID, req)
+	//log.Printf("server %v recieve request: %v", kv.rf.ID, req)
 
 	index, _, _ := kv.rf.Start(Op{Key: req.Key, Value: req.Value, Operation: req.Op, ID: req.ID, Seq: req.Seq})
-
-	select {
-	case doneIndex, _ := <-kv.done:
-		if doneIndex == index {
-			res.Err = OK
+	timeout := time.NewTimer(500 * time.Millisecond)
+	for {
+		select {
+		case doneIndex, _ := <-kv.done:
+			if doneIndex == index {
+				res.Err = OK
+				return
+			}
+		case <-timeout.C:
+			timeout.Stop()
+			res.Err = ErrTimeout
 			return
 		}
-	case <-time.After(time.Second):
-		res.Err = ErrTimeout
-		return
 	}
 }
 
@@ -114,22 +117,19 @@ func (kv *KVServer) apply() {
 			if ok && !msg.NoOpCommand {
 				op := msg.Command.(Op)
 				kv.mu.Lock()
-				seq, _ := kv.executed[op.ID]
-				if seq >= op.Seq {
-					kv.mu.Unlock()
-					break
-				}
-				switch op.Operation {
-				case "Put":
-					kv.db[op.Key] = op.Value
-					kv.executed[op.ID] = op.Seq
-				case "Append":
-					kv.db[op.Key] += op.Value
-					kv.executed[op.ID] = op.Seq
-				default:
-				}
-				if kv.rf.State() == raft.Leader {
-					kv.done <- msg.CommandIndex
+				if seq, _ := kv.executed[op.ID]; seq < op.Seq {
+					switch op.Operation {
+					case "Put":
+						kv.db[op.Key] = op.Value
+						kv.executed[op.ID] = op.Seq
+					case "Append":
+						kv.db[op.Key] += op.Value
+						kv.executed[op.ID] = op.Seq
+					default:
+					}
+					if kv.rf.State() == raft.Leader {
+						kv.done <- msg.CommandIndex
+					}
 				}
 				kv.mu.Unlock()
 			}

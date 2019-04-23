@@ -20,6 +20,7 @@ package raft
 import (
 	"bytes"
 	"errors"
+	"log"
 	"math/rand"
 	"sort"
 	"sync"
@@ -56,9 +57,11 @@ const (
 	Leader State = iota
 	Candidate
 	Follower
+	PreCandidate
 )
 
-const HeartBeatInterval = 50 * time.Millisecond // 50mS
+const HeartBeatInterval = 40 * time.Millisecond // 40mS
+const preVote = true
 
 //
 // A Go object implementing a single Raft peer.
@@ -91,6 +94,7 @@ type Raft struct {
 	matchIndex []uint64
 
 	electionTimeout time.Duration
+	lastHeartBeat   time.Time     // timestamp of last heartbeat
 	resetCh         chan struct{} // signal for converting to Follower and reset election ticker
 	applyCh         chan ApplyMsg
 }
@@ -126,8 +130,17 @@ func (rf *Raft) convertToFollower(term uint64) {
 	rf.state = Follower
 	rf.votedFor = ``
 
-	//logger.Printf("Follower ID:%s\n", rf.ID)
-	//logger.Printf("Follower term: %d\n", rf.currentTerm)
+	logger.Printf("Follower ID:%s\n", rf.ID)
+	logger.Printf("Follower term: %d\n", rf.currentTerm)
+}
+
+func (rf *Raft) convertToPreCandidate() {
+	rf.mu.Lock()
+	rf.state = PreCandidate
+	rf.mu.Unlock()
+
+	logger.Printf("Pre-candidate ID:%s\n", rf.ID)
+	logger.Printf("Pre-candidate term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToCandidate() {
@@ -138,8 +151,8 @@ func (rf *Raft) convertToCandidate() {
 	rf.votedFor = rf.ID
 
 	rf.mu.Unlock()
-	//logger.Printf("Candidate ID:%s\n", rf.ID)
-	//logger.Printf("Candidate term: %d\n", rf.currentTerm)
+	logger.Printf("Candidate ID:%s\n", rf.ID)
+	logger.Printf("Candidate term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToLeader() {
@@ -162,8 +175,8 @@ func (rf *Raft) convertToLeader() {
 	}
 
 	rf.mu.Unlock()
-	//logger.Printf("Leader ID:%s\n", rf.ID)
-	//logger.Printf("Leader term: %d\n", rf.currentTerm)
+	logger.Printf("Leader ID:%s\n", rf.ID)
+	logger.Printf("Leader term: %d\n", rf.currentTerm)
 }
 
 /*
@@ -219,6 +232,7 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteRequest struct {
 	// Your data here (2A, 2B).
+	PreVote      bool
 	Term         uint64 // Candidate's term
 	CandidateId  string // Candidate's ID
 	LastLogIndex uint64 // index of Candidate's last log entry
@@ -235,11 +249,20 @@ type RequestVoteResponse struct {
 	VoteGranted bool   // true if Candidate can receive vote
 }
 
-func (rf *Raft) NewVoteRequest() *RequestVoteRequest {
+func (rf *Raft) NewVoteRequest(preVote bool) *RequestVoteRequest {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	var currentTerm uint64
+	if preVote {
+		currentTerm = rf.currentTerm + 1
+	} else {
+		currentTerm = rf.currentTerm
+	}
+
 	return &RequestVoteRequest{
-		rf.currentTerm,
+		preVote,
+		currentTerm,
 		rf.ID,
 		rf.log.LastIndex(),
 		rf.log.LastTerm(),
@@ -263,13 +286,15 @@ func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
 		return
 	}
 
-	var reset bool
-	if rf.state == Leader {
-		reset = true
-	}
+	//var reset bool
+	//if rf.state == Leader {
+	//	reset = true
+	//}
 	// If receiver's currentTerm is less than Candidate's term,
 	// receiver should update itself and convert to Follower.
-	rf.convertToFollower(req.Term)
+	if !req.PreVote {
+		rf.convertToFollower(req.Term)
+	}
 
 	// check whether Candidate's log is at least as up-to-date as receiver's log.
 	var upToDate bool
@@ -280,16 +305,19 @@ func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
 		upToDate = true
 	}
 	// if receiver is not a Candidate and upToDate is true, the Candidate will receive a vote.
-	if rf.votedFor == `` && upToDate {
+	if rf.votedFor == `` && upToDate && time.Now().Sub(rf.lastHeartBeat) > HeartBeatInterval/2 {
 		//log.Printf("%s voted for: %s", rf.ID, req.CandidateId)
-		rf.votedFor = req.CandidateId
-		res.VoteGranted = true
-		rf.resetCh <- struct{}{}
-	} else {
-		if reset {
+		if !req.PreVote {
+			rf.votedFor = req.CandidateId
 			rf.resetCh <- struct{}{}
 		}
+		res.VoteGranted = true
 	}
+	//else {
+	//	if reset {
+	//		rf.resetCh <- struct{}{}
+	//	}
+	//}
 
 	// persistent state should be persisted before responding to RPCs.
 	rf.persist()
@@ -372,7 +400,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//logger.Printf("server %s receives request: %v", rf.ID, req)
+	logger.Printf("server %s receives request: %v", rf.ID, req)
 
 	// return receiver's currentTerm for Candidate to update itself.
 	res.Term = rf.currentTerm
@@ -385,6 +413,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	// If receiver's currentTerm is not greater than Candidate's term, receiver should update itself and convert to Follower.
 	if rf.currentTerm <= req.Term {
 		rf.convertToFollower(req.Term)
+		rf.lastHeartBeat = time.Now()
 		rf.leader = req.LeaderId
 		rf.resetCh <- struct{}{}
 	}
@@ -505,7 +534,7 @@ func (rf *Raft) electLeader(voteCh chan struct{}) {
 		if i != rf.me {
 			go func(server int) {
 				var response RequestVoteResponse
-				if rf.sendRequestVote(server, rf.NewVoteRequest(), &response) {
+				if rf.sendRequestVote(server, rf.NewVoteRequest(preVote), &response) {
 					rf.handleVoteResponse(response, voteCh)
 				}
 			}(i)
@@ -539,7 +568,7 @@ func (rf *Raft) HeartBeat() error {
 		}
 	}
 	j := 1
-	timeout := time.NewTimer(100 * time.Millisecond)
+	timeout := time.NewTimer(200 * time.Millisecond)
 	for {
 		select {
 		case <-res:
@@ -577,7 +606,7 @@ func (rf *Raft) apply() {
 	for rf.lastApplied < rf.commitIndex {
 		//log.Printf("commit index of server %v: %v", rf.ID, rf.commitIndex)
 		//if rf.state == Leader {
-		//log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
+		log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
 		//}
 		rf.lastApplied++
 		apply := rf.log.Apply(rf.lastApplied)
@@ -606,6 +635,10 @@ func (rf *Raft) followerLoop() {
 		select {
 		case <-electionTimer.C:
 			electionTimer.Stop()
+			if preVote {
+				rf.convertToPreCandidate()
+				return
+			}
 			rf.convertToCandidate()
 			return
 		case <-rf.resetCh:
@@ -613,6 +646,34 @@ func (rf *Raft) followerLoop() {
 				<-electionTimer.C
 			}
 			electionTimer.Reset(rf.electionTimeout)
+		}
+	}
+}
+
+func (rf *Raft) preCandidateLoop() {
+	votes := 1
+	voteCh := make(chan struct{}, len(rf.peers)-1)
+	timeout := time.NewTimer(3 * HeartBeatInterval)
+	rf.electLeader(voteCh)
+
+Loop:
+	for {
+		select {
+		case <-voteCh:
+			votes++
+			if votes > len(rf.peers)/2 {
+				rf.convertToCandidate()
+				break Loop
+			}
+		case <-timeout.C:
+			timeout.Stop()
+			rf.mu.Lock()
+			term := rf.currentTerm
+			rf.mu.Unlock()
+			rf.convertToFollower(term)
+			break Loop
+		case <-rf.resetCh:
+			break Loop
 		}
 	}
 }
@@ -736,6 +797,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			switch rf.State() {
 			case Leader:
 				rf.leaderLoop()
+			case PreCandidate:
+				rf.preCandidateLoop()
 			case Candidate:
 				rf.candidateLoop()
 			case Follower:
