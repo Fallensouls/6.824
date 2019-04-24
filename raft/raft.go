@@ -20,7 +20,6 @@ package raft
 import (
 	"bytes"
 	"errors"
-	"log"
 	"math/rand"
 	"sort"
 	"sync"
@@ -130,8 +129,8 @@ func (rf *Raft) convertToFollower(term uint64) {
 	rf.state = Follower
 	rf.votedFor = ``
 
-	logger.Printf("Follower ID:%s\n", rf.ID)
-	logger.Printf("Follower term: %d\n", rf.currentTerm)
+	//logger.Printf("Follower ID:%v\n", rf.me)
+	//logger.Printf("Follower term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToPreCandidate() {
@@ -139,8 +138,8 @@ func (rf *Raft) convertToPreCandidate() {
 	rf.state = PreCandidate
 	rf.mu.Unlock()
 
-	logger.Printf("Pre-candidate ID:%s\n", rf.ID)
-	logger.Printf("Pre-candidate term: %d\n", rf.currentTerm)
+	//logger.Printf("Pre-candidate ID:%v\n", rf.me)
+	//logger.Printf("Pre-candidate term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToCandidate() {
@@ -151,8 +150,8 @@ func (rf *Raft) convertToCandidate() {
 	rf.votedFor = rf.ID
 
 	rf.mu.Unlock()
-	logger.Printf("Candidate ID:%s\n", rf.ID)
-	logger.Printf("Candidate term: %d\n", rf.currentTerm)
+	//logger.Printf("Candidate ID:%v\n", rf.me)
+	//logger.Printf("Candidate term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToLeader() {
@@ -175,8 +174,8 @@ func (rf *Raft) convertToLeader() {
 	}
 
 	rf.mu.Unlock()
-	logger.Printf("Leader ID:%s\n", rf.ID)
-	logger.Printf("Leader term: %d\n", rf.currentTerm)
+	//logger.Printf("Leader ID:%v\n", rf.me)
+	//logger.Printf("Leader term: %d\n", rf.currentTerm)
 }
 
 /*
@@ -329,6 +328,7 @@ func (rf *Raft) handleVoteResponse(res RequestVoteResponse, voteCh chan<- struct
 
 	if rf.currentTerm < res.Term {
 		rf.convertToFollower(res.Term)
+		rf.resetCh <- struct{}{}
 		return
 	}
 	if res.VoteGranted {
@@ -400,7 +400,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	logger.Printf("server %s receives request: %v", rf.ID, req)
+	logger.Printf("server %v receives request: %v", rf.me, req)
 
 	// return receiver's currentTerm for Candidate to update itself.
 	res.Term = rf.currentTerm
@@ -529,7 +529,7 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, res
 *****************************
  */
 
-func (rf *Raft) electLeader(voteCh chan struct{}) {
+func (rf *Raft) electLeader(preVote bool, voteCh chan struct{}) {
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
@@ -606,7 +606,7 @@ func (rf *Raft) apply() {
 	for rf.lastApplied < rf.commitIndex {
 		//log.Printf("commit index of server %v: %v", rf.ID, rf.commitIndex)
 		//if rf.state == Leader {
-		log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
+		//log.Printf("log of server %v: %v", rf.me, rf.log.Entries)
 		//}
 		rf.lastApplied++
 		apply := rf.log.Apply(rf.lastApplied)
@@ -653,8 +653,8 @@ func (rf *Raft) followerLoop() {
 func (rf *Raft) preCandidateLoop() {
 	votes := 1
 	voteCh := make(chan struct{}, len(rf.peers)-1)
-	timeout := time.NewTimer(3 * HeartBeatInterval)
-	rf.electLeader(voteCh)
+	timeout := time.NewTimer(5 * HeartBeatInterval)
+	rf.electLeader(true, voteCh)
 
 Loop:
 	for {
@@ -668,9 +668,8 @@ Loop:
 		case <-timeout.C:
 			timeout.Stop()
 			rf.mu.Lock()
-			term := rf.currentTerm
+			rf.convertToFollower(rf.currentTerm)
 			rf.mu.Unlock()
-			rf.convertToFollower(term)
 			break Loop
 		case <-rf.resetCh:
 			break Loop
@@ -687,7 +686,7 @@ func (rf *Raft) candidateLoop() {
 	votes := 1
 	voteCh := make(chan struct{}, len(rf.peers)-1)
 	electionTicker := time.NewTicker(rf.electionTimeout)
-	rf.electLeader(voteCh)
+	rf.electLeader(false, voteCh)
 
 Loop:
 	for {

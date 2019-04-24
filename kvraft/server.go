@@ -91,10 +91,10 @@ func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 	}
 
 	// print all the valid requests.
-	//log.Printf("server %v recieve request: %v", kv.rf.ID, req)
+	log.Printf("server %v recieve request: %v", kv.rf.ID, req)
 
 	index, _, _ := kv.rf.Start(Op{Key: req.Key, Value: req.Value, Operation: req.Op, ID: req.ID, Seq: req.Seq})
-	timeout := time.NewTimer(500 * time.Millisecond)
+	timeout := time.NewTimer(5 * raft.HeartBeatInterval)
 	for {
 		select {
 		case doneIndex, _ := <-kv.done:
