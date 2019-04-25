@@ -47,31 +47,40 @@ type KVServer struct {
 func (kv *KVServer) Get(req *GetRequest, res *GetResponse) {
 	// return if receiver isn't the leader.
 	//log.Printf("state: %v", kv.rf.State())
+
 	if kv.rf.State() != raft.Leader {
 		res.WrongLeader = true
 		return
 	}
 
 	// ensure that receiver is still the leader.
-	if err := kv.rf.HeartBeat(); err != nil {
+	err := kv.rf.Read()
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if err == raft.ErrPartitioned {
 		res.WrongLeader = false
 		res.Err = ErrPartitioned
 		return
 	}
-	if kv.rf.State() != raft.Leader {
+
+	if err == raft.ErrNotLeader {
 		res.WrongLeader = true
 		return
 	}
 
 	res.WrongLeader = false
+
+	//kv.mu.Lock()
 	var ok bool
-	kv.mu.Lock()
 	if res.Value, ok = kv.db[req.Key]; ok {
+		log.Printf("key %v:  %v", req.Key, res.Value)
 		res.Err = OK
 	} else {
 		res.Err = ErrNoKey
+		log.Println(res.Err, req.Key, kv.db, kv.me)
 	}
-	kv.mu.Unlock()
+	//kv.mu.Unlock()
 }
 
 func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
@@ -91,13 +100,13 @@ func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 	}
 
 	// print all the valid requests.
-	log.Printf("server %v recieve request: %v", kv.rf.ID, req)
+	//log.Printf("server %v recieve request: %v", kv.rf.ID, req)
 
 	index, _, _ := kv.rf.Start(Op{Key: req.Key, Value: req.Value, Operation: req.Op, ID: req.ID, Seq: req.Seq})
-	timeout := time.NewTimer(5 * raft.HeartBeatInterval)
+	timeout := time.NewTimer(10 * raft.HeartBeatInterval)
 	for {
 		select {
-		case doneIndex, _ := <-kv.done:
+		case doneIndex := <-kv.done:
 			if doneIndex == index {
 				res.Err = OK
 				return
@@ -117,7 +126,8 @@ func (kv *KVServer) apply() {
 			if ok && !msg.NoOpCommand {
 				op := msg.Command.(Op)
 				kv.mu.Lock()
-				if seq, _ := kv.executed[op.ID]; seq < op.Seq {
+				if seq := kv.executed[op.ID]; seq < op.Seq {
+					log.Printf("op of server %v: %v", kv.me, op)
 					switch op.Operation {
 					case "Put":
 						kv.db[op.Key] = op.Value
@@ -172,7 +182,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.done = make(chan int, 50)
+	kv.done = make(chan int, 100)
 	kv.db = make(map[string]string)
 	kv.executed = make(map[string]uint64)
 	kv.applyCh = make(chan raft.ApplyMsg)

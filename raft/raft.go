@@ -20,6 +20,7 @@ package raft
 import (
 	"bytes"
 	"errors"
+	"log"
 	"math/rand"
 	"sort"
 	"sync"
@@ -61,6 +62,12 @@ const (
 
 const HeartBeatInterval = 40 * time.Millisecond // 40mS
 const preVote = true
+
+var (
+	ErrNotLeader   = errors.New("not a leader")
+	ErrPartitioned = errors.New("network partitions")
+	ErrTimeout     = errors.New("timeout")
+)
 
 //
 // A Go object implementing a single Raft peer.
@@ -197,6 +204,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.commitIndex)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -216,7 +224,7 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&rf.currentTerm)
 	d.Decode(&rf.votedFor)
 	d.Decode(rf.log)
-
+	d.Decode(&rf.commitIndex)
 }
 
 /*
@@ -400,7 +408,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	logger.Printf("server %v receives request: %v", rf.me, req)
+	//logger.Printf("server %v receives request: %v", rf.me, req)
 
 	// return receiver's currentTerm for Candidate to update itself.
 	res.Term = rf.currentTerm
@@ -612,6 +620,7 @@ func (rf *Raft) apply() {
 		apply := rf.log.Apply(rf.lastApplied)
 		applyMsg = append(applyMsg, apply)
 	}
+	//log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
 	rf.mu.Unlock()
 
 	//logger.Printf("apply message of server %v: %v", rf.ID, applyMsg)
@@ -751,6 +760,29 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.mu.Unlock()
 	return int(index), int(term), isLeader
+}
+
+func (rf *Raft) Read() error {
+	rf.mu.Lock()
+	readIndex := rf.commitIndex
+	rf.mu.Unlock()
+	log.Printf("read index: %v", readIndex)
+	log.Println(rf.log.Entries)
+	if err := rf.HeartBeat(); err != nil {
+		return ErrPartitioned
+	}
+	if rf.State() != Leader {
+		return ErrNotLeader
+	}
+	log.Printf("last applied: %v", rf.lastApplied)
+	for rf.lastApplied < readIndex {
+		select {
+		case <-time.After(5 * HeartBeatInterval):
+			return ErrTimeout
+		default:
+		}
+	}
+	return nil
 }
 
 //
