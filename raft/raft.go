@@ -205,6 +205,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
 	e.Encode(rf.commitIndex)
+	//e.Encode(rf.lastApplied)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -225,6 +226,7 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&rf.votedFor)
 	d.Decode(rf.log)
 	d.Decode(&rf.commitIndex)
+	//d.Decode(&rf.lastApplied)
 }
 
 /*
@@ -576,7 +578,7 @@ func (rf *Raft) HeartBeat() error {
 		}
 	}
 	j := 1
-	timeout := time.NewTimer(200 * time.Millisecond)
+	timeout := time.NewTimer(time.Second)
 	for {
 		select {
 		case <-res:
@@ -763,25 +765,24 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 func (rf *Raft) Read() error {
-	rf.mu.Lock()
 	readIndex := rf.commitIndex
-	rf.mu.Unlock()
 	log.Printf("read index: %v", readIndex)
-	log.Println(rf.log.Entries)
 	if err := rf.HeartBeat(); err != nil {
 		return ErrPartitioned
 	}
 	if rf.State() != Leader {
 		return ErrNotLeader
 	}
-	log.Printf("last applied: %v", rf.lastApplied)
+
 	for rf.lastApplied < readIndex {
+		//log.Printf("last applied: %v", rf.lastApplied)
 		select {
 		case <-time.After(5 * HeartBeatInterval):
 			return ErrTimeout
 		default:
 		}
 	}
+	//log.Printf("last applied: %v", rf.lastApplied)
 	return nil
 }
 

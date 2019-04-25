@@ -69,6 +69,12 @@ func (kv *KVServer) Get(req *GetRequest, res *GetResponse) {
 		return
 	}
 
+	if err == raft.ErrTimeout {
+		res.WrongLeader = false
+		res.Err = ErrTimeout
+		return
+	}
+
 	res.WrongLeader = false
 
 	//kv.mu.Lock()
@@ -100,7 +106,7 @@ func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 	}
 
 	// print all the valid requests.
-	//log.Printf("server %v recieve request: %v", kv.rf.ID, req)
+	log.Printf("server %v recieve request: %v", kv.rf.ID, req)
 
 	index, _, _ := kv.rf.Start(Op{Key: req.Key, Value: req.Value, Operation: req.Op, ID: req.ID, Seq: req.Seq})
 	timeout := time.NewTimer(10 * raft.HeartBeatInterval)
@@ -124,6 +130,8 @@ func (kv *KVServer) apply() {
 		select {
 		case msg, ok := <-kv.applyCh:
 			if ok && !msg.NoOpCommand {
+				//log.Printf("command of server %v: %v", kv.me, msg)
+				//log.Println(kv.executed)
 				op := msg.Command.(Op)
 				kv.mu.Lock()
 				if seq := kv.executed[op.ID]; seq < op.Seq {
@@ -188,6 +196,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	time.Sleep(raft.HeartBeatInterval)
 	// You may need initialization code here.
 	go kv.apply()
 

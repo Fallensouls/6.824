@@ -184,7 +184,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 	ck := cfg.makeClient(cfg.All())
 
 	done_partitioner := int32(0)
-	done_clients := int32(0)
+	done_clients := [3]int32{}
 	ch_partitioner := make(chan bool)
 	clnts := make([]chan int, nclients)
 	for i := 0; i < nclients; i++ {
@@ -192,8 +192,8 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 	}
 	for i := 0; i < 3; i++ {
 		// log.Printf("Iteration %v\n", i)
-		atomic.StoreInt32(&done_clients, 0)
-		atomic.StoreInt32(&done_partitioner, 0)
+		//atomic.StoreInt32(&done_clients, 0)
+		//atomic.StoreInt32(&done_partitioner, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
 			j := 0
 			defer func() {
@@ -202,7 +202,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			last := ""
 			key := strconv.Itoa(cli)
 			Put(cfg, myck, key, last)
-			for atomic.LoadInt32(&done_clients) == 0 {
+			for atomic.LoadInt32(&done_clients[i]) == 0 {
 				if (rand.Int() % 1000) < 500 {
 					nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 					// log.Printf("%d: client new append %v\n", cli, nv)
@@ -212,8 +212,10 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				} else {
 					// log.Printf("%d: client new get %v\n", cli, key)
 					v := Get(cfg, myck, key)
-					if v != last {
-						log.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
+					if atomic.LoadInt32(&done_clients[i]) == 0 {
+						if v != last {
+							log.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
+						}
 					}
 				}
 			}
@@ -226,7 +228,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		}
 		time.Sleep(5 * time.Second)
 
-		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
+		atomic.StoreInt32(&done_clients[i], 1)  // tell clients to quit
 		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
 
 		if partitions {

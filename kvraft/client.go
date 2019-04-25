@@ -2,7 +2,6 @@ package raftkv
 
 import (
 	"crypto/rand"
-	"log"
 	"math/big"
 
 	"github.com/Fallensouls/raft/raft"
@@ -57,10 +56,9 @@ func (ck *Clerk) Get(key string) string {
 			//log.Println(res)
 			continue
 		}
-		if res.Err == ErrPartitioned {
+		if res.Err == ErrPartitioned || res.Err == ErrTimeout {
 			continue
 		}
-		log.Println(res.Value)
 		return res.Value
 	}
 }
