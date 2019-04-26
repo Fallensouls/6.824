@@ -79,7 +79,7 @@ func (l *Log) EntriesAfter(index uint64) []LogEntry {
 	return l.Entries[storageIndex:]
 }
 
-func (l *Log) Apply(index uint64) ApplyMsg {
+func (l *Log) Apply(index uint64, recover bool) ApplyMsg {
 	command := l.Entry(index).Command
 	var noop bool
 	if command == nil {
@@ -91,6 +91,7 @@ func (l *Log) Apply(index uint64) ApplyMsg {
 		CommandIndex: int(index),
 		Command:      command,
 		NoOpCommand:  noop,
+		Recover:      recover,
 	}
 	return applyMsg
 }

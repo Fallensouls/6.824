@@ -51,9 +51,7 @@ func (ck *Clerk) Get(key string) string {
 		// send rpc to the last leader first.
 		ok := ck.servers[ck.lastLeader].Call("KVServer.Get", &req, &res)
 		if !ok || res.WrongLeader {
-			//log.Printf("retry: %v", retry)
 			ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
-			//log.Println(res)
 			continue
 		}
 		if res.Err == ErrPartitioned || res.Err == ErrTimeout {
@@ -78,7 +76,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		var res PutAppendResponse
 		ok := ck.servers[ck.lastLeader].Call("KVServer.PutAppend", &req, &res)
-		//log.Println(req, res)
 		if !ok || res.WrongLeader {
 			ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
 			continue

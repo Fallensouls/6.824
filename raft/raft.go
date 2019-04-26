@@ -20,7 +20,6 @@ package raft
 import (
 	"bytes"
 	"errors"
-	"log"
 	"math/rand"
 	"sort"
 	"sync"
@@ -49,6 +48,7 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 	NoOpCommand  bool
+	Recover      bool
 }
 
 type State uint8
@@ -99,6 +99,7 @@ type Raft struct {
 	nextIndex  []uint64
 	matchIndex []uint64
 
+	recover         uint64 // last applied index before the server crashes
 	electionTimeout time.Duration
 	lastHeartBeat   time.Time     // timestamp of last heartbeat
 	resetCh         chan struct{} // signal for converting to Follower and reset election ticker
@@ -204,7 +205,10 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
-	e.Encode(rf.commitIndex)
+	if rf.recover < rf.lastApplied {
+		rf.recover = rf.lastApplied
+	}
+	e.Encode(rf.recover)
 	//e.Encode(rf.lastApplied)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
@@ -225,7 +229,7 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&rf.currentTerm)
 	d.Decode(&rf.votedFor)
 	d.Decode(rf.log)
-	d.Decode(&rf.commitIndex)
+	d.Decode(&rf.recover)
 	//d.Decode(&rf.lastApplied)
 }
 
@@ -565,7 +569,7 @@ func (rf *Raft) broadcast() {
 	}
 }
 
-func (rf *Raft) HeartBeat() error {
+func (rf *Raft) heartBeat() error {
 	res := make(chan struct{}, len(rf.peers)-1)
 	for i := range rf.peers {
 		if i != rf.me {
@@ -613,22 +617,31 @@ func (rf *Raft) updateCommitIndex() {
 func (rf *Raft) apply() {
 	rf.mu.Lock()
 	var applyMsg []ApplyMsg
-	for rf.lastApplied < rf.commitIndex {
+	lastApplied := rf.lastApplied
+	for lastApplied < rf.commitIndex {
 		//log.Printf("commit index of server %v: %v", rf.ID, rf.commitIndex)
 		//if rf.state == Leader {
 		//log.Printf("log of server %v: %v", rf.me, rf.log.Entries)
 		//}
-		rf.lastApplied++
-		apply := rf.log.Apply(rf.lastApplied)
+		lastApplied++
+		apply := rf.log.Apply(lastApplied, lastApplied < rf.recover)
 		applyMsg = append(applyMsg, apply)
 	}
 	//log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
 	rf.mu.Unlock()
 
 	//logger.Printf("apply message of server %v: %v", rf.ID, applyMsg)
-	for _, msg := range applyMsg {
-		rf.applyCh <- msg
+
+	for i, msg := range applyMsg {
+		select {
+		case <-time.After(time.Second):
+			rf.lastApplied += uint64(i)
+			return
+		default:
+			rf.applyCh <- msg
+		}
 	}
+	rf.lastApplied = lastApplied
 }
 
 /*
@@ -766,8 +779,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) Read() error {
 	readIndex := rf.commitIndex
-	log.Printf("read index: %v", readIndex)
-	if err := rf.HeartBeat(); err != nil {
+	if readIndex == 0 {
+		readIndex = rf.recover
+	}
+
+	if err := rf.heartBeat(); err != nil {
 		return ErrPartitioned
 	}
 	if rf.State() != Leader {

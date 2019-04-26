@@ -212,10 +212,8 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				} else {
 					// log.Printf("%d: client new get %v\n", cli, key)
 					v := Get(cfg, myck, key)
-					if atomic.LoadInt32(&done_clients[i]) == 0 {
-						if v != last {
-							log.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
-						}
+					if v != last {
+						log.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
 					}
 				}
 			}
@@ -244,10 +242,12 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		}
 
 		if crash {
+			time.Sleep(15 * time.Millisecond)
 			// log.Printf("shutdown servers\n")
 			for i := 0; i < nservers; i++ {
 				cfg.ShutdownServer(i)
 			}
+			log.Printf("all server crash")
 			// Wait for a while for servers to shutdown, since
 			// shutdown isn't a real crash and isn't instantaneous
 			time.Sleep(electionTimeout)
@@ -257,12 +257,14 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				cfg.StartServer(i)
 			}
 			cfg.ConnectAll()
+			//time.Sleep(3 * time.Second)
 		}
 
 		// log.Printf("wait for clients\n")
 		for i := 0; i < nclients; i++ {
 			// log.Printf("read from clients %d\n", i)
 			j := <-clnts[i]
+			//log.Printf("last key: %v", j)
 			// if j < 10 {
 			// 	log.Printf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
 			// }
@@ -386,6 +388,7 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 		}
 
 		if crash {
+			time.Sleep(15 * time.Millisecond)
 			// log.Printf("shutdown servers\n")
 			for i := 0; i < nservers; i++ {
 				cfg.ShutdownServer(i)
