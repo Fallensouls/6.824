@@ -20,8 +20,16 @@ func (l *Log) GetLastIncludedTerm() uint64 {
 	return l.LastIncludedTerm
 }
 
+func (l *Log) SetLastIncludedTerm(term uint64) {
+	l.LastIncludedTerm = term
+}
+
 func (l *Log) GetLastIncludedIndex() uint64 {
 	return l.LastIncludedIndex
+}
+
+func (l *Log) SetLastIncludedIndex(index uint64) {
+	l.LastIncludedIndex = index
 }
 
 func (l *Log) AddEntry(term uint64, command interface{}) {
@@ -105,4 +113,16 @@ func (l *Log) SearchFirstIndex(index, term uint64) (firstIndex uint64) {
 		}
 	}
 	return 1
+}
+
+func (l *Log) DiscardLogBefore(index uint64) {
+	if index <= l.LastIncludedIndex {
+		return
+	}
+	if l.LastIndex() < index {
+		l.Entries = make([]LogEntry, 0)
+		return
+	}
+	storageIndex := index - l.LastIncludedIndex - 1
+	l.Entries = l.Entries[storageIndex:]
 }

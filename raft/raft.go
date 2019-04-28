@@ -197,9 +197,7 @@ func (rf *Raft) convertToLeader() {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
-func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:`
+func (rf *Raft) nodeState() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -209,9 +207,14 @@ func (rf *Raft) persist() {
 		rf.recover = rf.lastApplied
 	}
 	e.Encode(rf.recover)
-	//e.Encode(rf.lastApplied)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	return w.Bytes()
+}
+
+func (rf *Raft) persist() {
+	// Your code here (2C).
+	// Example:`
+	state := rf.nodeState()
+	rf.persister.SaveRaftState(state)
 }
 
 //
@@ -498,6 +501,53 @@ func (rf *Raft) handleAppendEntriesResponse(server int, res AppendEntriesRespons
 	go rf.updateCommitIndex()
 }
 
+/*
+*****************************
+*     Install Snapshot      *
+*****************************
+ */
+type InstallSnapshotRequest struct {
+	Term              uint64
+	LeaderId          string
+	LastIncludedIndex uint64
+	LastIncludedTerm  uint64
+	Offset            uint64
+	data              []byte
+	done              bool
+}
+
+type InstallSnapshotResponse struct {
+	Term uint64
+}
+
+// InstallSnapshot rpc will be send when the leader has already
+// discarded the next log entry that it needs to send to a follower.
+func (rf *Raft) InstallSnapshot(req *InstallSnapshotRequest, res *InstallSnapshotResponse) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	res.Term = rf.currentTerm
+	if rf.currentTerm <= req.Term {
+		rf.convertToFollower(req.Term)
+		rf.lastHeartBeat = time.Now()
+		rf.leader = req.LeaderId
+		rf.resetCh <- struct{}{}
+		return
+	}
+
+	if req.Offset == 0 {
+		// update lastIncludedIndex and LastIncludedTerm
+		rf.log.SetLastIncludedIndex(req.LastIncludedIndex)
+		rf.log.SetLastIncludedTerm(req.LastIncludedTerm)
+		// create a new snapshot file if first chunk
+	}
+
+	rf.persister.SaveStateAndSnapshot(rf.nodeState(), req.data)
+	// write data into snapshot file at given offset
+	rf.log.DiscardLogBefore(req.LastIncludedIndex + 1)
+
+}
+
 //
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
@@ -534,6 +584,11 @@ func (rf *Raft) sendRequestVote(server int, request *RequestVoteRequest, respons
 
 func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, response *AppendEntriesResponse) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", request, response)
+	return ok
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", request, response)
 	return ok
 }
 
