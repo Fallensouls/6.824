@@ -10,6 +10,7 @@ type Log struct {
 	Entries           []LogEntry
 	LastIncludedIndex uint64
 	LastIncludedTerm  uint64
+	MaxSize           uint64
 }
 
 func NewLog() *Log {

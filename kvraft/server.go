@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"time"
@@ -37,6 +38,7 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 
 	maxraftstate int // snapshot if log grows this big
+	persister    *raft.Persister
 
 	// Your definitions here.
 	done     chan int
@@ -119,6 +121,27 @@ func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 	}
 }
 
+func (kv *KVServer) createSnapshot() {
+	log.Printf("create snapshot...")
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.executed)
+	e.Encode(kv.db)
+	data := w.Bytes()
+	kv.rf.SaveSnapshot(data)
+}
+
+func (kv *KVServer) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	d.Decode(&kv.db)
+	d.Decode(&kv.executed)
+}
+
 func (kv *KVServer) apply() {
 	for {
 		select {
@@ -142,6 +165,9 @@ func (kv *KVServer) apply() {
 					}
 				}
 			}
+		case <-kv.rf.SnapshotCh:
+			kv.createSnapshot()
+			kv.rf.Done <- struct{}{}
 		}
 	}
 }
@@ -179,15 +205,17 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.persister = persister
 
-	// You may need initialization code here.
 	kv.done = make(chan int, 100)
 	kv.db = make(map[string]string)
 	kv.executed = make(map[string]uint64)
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.rf.SetMaxSize(kv.maxraftstate)
+	kv.readSnapshot(kv.rf.ReadSnapshot())
+
 	go kv.apply()
 
 	return kv

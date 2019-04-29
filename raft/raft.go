@@ -20,6 +20,7 @@ package raft
 import (
 	"bytes"
 	"errors"
+	"log"
 	"math/rand"
 	"sort"
 	"sync"
@@ -78,7 +79,7 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 
-	// Your data here (2A, 2B, 2C).
+	// Your Data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
@@ -101,7 +102,9 @@ type Raft struct {
 
 	recover         uint64 // last applied index before the server crashes
 	electionTimeout time.Duration
-	lastHeartBeat   time.Time     // timestamp of last heartbeat
+	lastHeartBeat   time.Time // timestamp of last heartbeat
+	SnapshotCh      chan struct{}
+	Done            chan struct{}
 	resetCh         chan struct{} // signal for converting to Follower and reset election ticker
 	applyCh         chan ApplyMsg
 }
@@ -124,6 +127,40 @@ func (rf *Raft) State() State {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.state
+}
+
+func (rf *Raft) SetMaxSize(maxSize int) {
+	if maxSize < 0 {
+		maxSize = 0
+	}
+	rf.log.MaxSize = uint64(maxSize)
+}
+
+func (rf *Raft) createSnapshot(index uint64) {
+	log.Printf("%v", index)
+	if index > rf.lastApplied+1 {
+		log.Panicf("can not create snapshot with log entries that haven't been applied")
+	}
+	rf.SnapshotCh <- struct{}{}
+	term := rf.log.Entry(index).Term
+
+	select {
+	case <-rf.Done:
+		log.Printf("server %v discards log", rf.ID)
+		rf.log.DiscardLogBefore(index)
+		rf.log.SetLastIncludedIndex(index)
+		rf.log.SetLastIncludedTerm(term)
+	case <-time.After(time.Second):
+		break
+	}
+}
+
+func (rf *Raft) SaveSnapshot(data []byte) {
+	rf.persister.SaveStateAndSnapshot(rf.nodeState(), data)
+}
+
+func (rf *Raft) ReadSnapshot() []byte {
+	return rf.persister.ReadSnapshot()
 }
 
 /*
@@ -247,7 +284,7 @@ func (rf *Raft) readPersist(data []byte) {
 // field names must start with capital letters!
 //
 type RequestVoteRequest struct {
-	// Your data here (2A, 2B).
+	// Your Data here (2A, 2B).
 	PreVote      bool
 	Term         uint64 // Candidate's term
 	CandidateId  string // Candidate's ID
@@ -260,7 +297,7 @@ type RequestVoteRequest struct {
 // field names must start with capital letters!
 //
 type RequestVoteResponse struct {
-	// Your data here (2A).
+	// Your Data here (2A).
 	Term        uint64 // receiver's currentTerm
 	VoteGranted bool   // true if Candidate can receive vote
 }
@@ -302,10 +339,6 @@ func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
 		return
 	}
 
-	//var reset bool
-	//if rf.state == Leader {
-	//	reset = true
-	//}
 	// If receiver's currentTerm is less than Candidate's term,
 	// receiver should update itself and convert to Follower.
 	if !req.PreVote {
@@ -329,11 +362,6 @@ func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
 		}
 		res.VoteGranted = true
 	}
-	//else {
-	//	if reset {
-	//		rf.resetCh <- struct{}{}
-	//	}
-	//}
 
 	// persistent state should be persisted before responding to RPCs.
 	rf.persist()
@@ -512,12 +540,27 @@ type InstallSnapshotRequest struct {
 	LastIncludedIndex uint64
 	LastIncludedTerm  uint64
 	Offset            uint64
-	data              []byte
-	done              bool
+	Data              []byte
+	Done              bool
 }
 
 type InstallSnapshotResponse struct {
 	Term uint64
+}
+
+func (rf *Raft) NewInstallSnapshotRequest() *InstallSnapshotRequest {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	return &InstallSnapshotRequest{
+		rf.currentTerm,
+		rf.ID,
+		rf.log.LastIncludedIndex,
+		rf.log.LastIncludedTerm,
+		0,
+		rf.persister.ReadSnapshot(),
+		true,
+	}
 }
 
 // InstallSnapshot rpc will be send when the leader has already
@@ -535,17 +578,39 @@ func (rf *Raft) InstallSnapshot(req *InstallSnapshotRequest, res *InstallSnapsho
 		return
 	}
 
-	if req.Offset == 0 {
-		// update lastIncludedIndex and LastIncludedTerm
-		rf.log.SetLastIncludedIndex(req.LastIncludedIndex)
-		rf.log.SetLastIncludedTerm(req.LastIncludedTerm)
-		// create a new snapshot file if first chunk
+	// reject old snapshot
+	if req.LastIncludedIndex < rf.log.LastIncludedIndex {
+		return
 	}
 
-	rf.persister.SaveStateAndSnapshot(rf.nodeState(), req.data)
-	// write data into snapshot file at given offset
-	rf.log.DiscardLogBefore(req.LastIncludedIndex + 1)
+	// update lastIncludedIndex and LastIncludedTerm
+	rf.log.SetLastIncludedIndex(req.LastIncludedIndex)
+	rf.log.SetLastIncludedTerm(req.LastIncludedTerm)
 
+	// save snapshot
+	rf.persister.SaveStateAndSnapshot(rf.nodeState(), req.Data)
+
+	// write Data into snapshot file at given offset
+	rf.log.DiscardLogBefore(req.LastIncludedIndex + 1)
+	rf.commitIndex = req.LastIncludedIndex
+	rf.lastApplied = req.LastIncludedIndex
+	rf.applyCh <- ApplyMsg{true, nil, int(rf.lastApplied), false, false}
+
+	rf.persist()
+}
+
+func (rf *Raft) handleInstallSnapshotResponse(server int, res InstallSnapshotResponse) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.currentTerm < res.Term {
+		rf.convertToFollower(res.Term)
+		rf.resetCh <- struct{}{}
+		return
+	}
+
+	rf.matchIndex[server] = rf.log.LastIncludedIndex
+	rf.nextIndex[server] = rf.log.LastIncludedIndex + 1
 }
 
 //
@@ -615,9 +680,16 @@ func (rf *Raft) broadcast() {
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
-				var response AppendEntriesResponse
-				if rf.sendAppendEntries(server, rf.NewAppendEntriesRequest(server), &response) {
-					rf.handleAppendEntriesResponse(server, response)
+				if rf.nextIndex[server] <= rf.log.LastIncludedIndex {
+					var response InstallSnapshotResponse
+					if rf.sendInstallSnapshot(server, rf.NewInstallSnapshotRequest(), &response) {
+						rf.handleInstallSnapshotResponse(server, response)
+					}
+				} else {
+					var response AppendEntriesResponse
+					if rf.sendAppendEntries(server, rf.NewAppendEntriesRequest(server), &response) {
+						rf.handleAppendEntriesResponse(server, response)
+					}
 				}
 			}(i)
 		}
@@ -697,6 +769,10 @@ func (rf *Raft) apply() {
 		}
 	}
 	rf.lastApplied = lastApplied
+
+	if rf.persister.RaftStateSize() >= int(rf.log.MaxSize) && rf.log.MaxSize != 0 {
+		go rf.createSnapshot(lastApplied)
+	}
 }
 
 /*
@@ -891,6 +967,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.log = NewLog()
 	rf.resetCh = make(chan struct{})
+	rf.SnapshotCh = make(chan struct{})
+	rf.Done = make(chan struct{})
 
 	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	rf.electionTimeout = time.Millisecond * time.Duration(400+rand.Intn(200))
