@@ -122,7 +122,7 @@ func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 }
 
 func (kv *KVServer) createSnapshot() {
-	log.Printf("create snapshot...")
+	//log.Printf("server %s creates snapshot...", kv.rf.ID)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.executed)
@@ -138,8 +138,8 @@ func (kv *KVServer) readSnapshot(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 
-	d.Decode(&kv.db)
 	d.Decode(&kv.executed)
+	d.Decode(&kv.db)
 }
 
 func (kv *KVServer) apply() {
@@ -167,7 +167,7 @@ func (kv *KVServer) apply() {
 			}
 		case <-kv.rf.SnapshotCh:
 			kv.createSnapshot()
-			kv.rf.Done <- struct{}{}
+			kv.rf.SnapshotDone <- struct{}{}
 		}
 	}
 }
@@ -216,6 +216,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf.SetMaxSize(kv.maxraftstate)
 	kv.readSnapshot(kv.rf.ReadSnapshot())
 
+	log.Printf("db of server %v: %v", kv.rf.ID, kv.db)
+	log.Printf("executed of server %v: %v", kv.rf.ID, kv.executed)
 	go kv.apply()
 
 	return kv

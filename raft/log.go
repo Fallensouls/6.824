@@ -55,7 +55,7 @@ func (l *Log) LastTerm() uint64 {
 	if entry != nil {
 		return entry.Term
 	}
-	return 0
+	return l.LastIncludedTerm
 }
 
 func (l *Log) LastIndex() uint64 {
@@ -63,7 +63,7 @@ func (l *Log) LastIndex() uint64 {
 	if entry != nil {
 		return entry.Index
 	}
-	return 0
+	return l.LastIncludedIndex
 }
 
 func (l *Log) Entry(index uint64) *LogEntry {

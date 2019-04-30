@@ -103,8 +103,9 @@ type Raft struct {
 	recover         uint64 // last applied index before the server crashes
 	electionTimeout time.Duration
 	lastHeartBeat   time.Time // timestamp of last heartbeat
+	snapshotting    bool
 	SnapshotCh      chan struct{}
-	Done            chan struct{}
+	SnapshotDone    chan struct{}
 	resetCh         chan struct{} // signal for converting to Follower and reset election ticker
 	applyCh         chan ApplyMsg
 }
@@ -137,19 +138,22 @@ func (rf *Raft) SetMaxSize(maxSize int) {
 }
 
 func (rf *Raft) createSnapshot(index uint64) {
-	log.Printf("%v", index)
+	log.Printf("server %v creates snapshot at index %v", rf.ID, index)
 	if index > rf.lastApplied+1 {
 		log.Panicf("can not create snapshot with log entries that haven't been applied")
 	}
+	if index <= rf.log.LastIncludedIndex {
+		return
+	}
 	rf.SnapshotCh <- struct{}{}
-	term := rf.log.Entry(index).Term
 
 	select {
-	case <-rf.Done:
-		log.Printf("server %v discards log", rf.ID)
-		rf.log.DiscardLogBefore(index)
+	case <-rf.SnapshotDone:
+		term := rf.log.Entry(index).Term
+		rf.log.DiscardLogBefore(index + 1)
 		rf.log.SetLastIncludedIndex(index)
 		rf.log.SetLastIncludedTerm(term)
+		rf.snapshotting = false
 	case <-time.After(time.Second):
 		break
 	}
@@ -411,6 +415,17 @@ func (rf *Raft) NewAppendEntriesRequest(server int) *AppendEntriesRequest {
 	defer rf.mu.Unlock()
 
 	prevLogIndex := rf.nextIndex[server] - 1
+	if prevLogIndex == rf.log.LastIncludedIndex {
+		return &AppendEntriesRequest{
+			rf.currentTerm,
+			rf.ID,
+			prevLogIndex,
+			rf.log.LastIncludedTerm,
+			rf.log.EntriesAfter(prevLogIndex),
+			rf.commitIndex,
+		}
+	}
+
 	entry := rf.log.Entry(prevLogIndex)
 	var prevLogTerm uint64
 	if entry != nil {
@@ -445,7 +460,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//logger.Printf("server %v receives request: %v", rf.me, req)
+	//logger.Printf("server %v receives request: %v", rf.ID, req)
 
 	// return receiver's currentTerm for Candidate to update itself.
 	res.Term = rf.currentTerm
@@ -502,7 +517,6 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 		res.Index = req.Entries[len(req.Entries)-1].Index
 	}
 
-	//logger.Printf("commit index of server %v: %v", rf.ID, rf.commitIndex)
 	go rf.apply()
 	rf.persist()
 }
@@ -525,7 +539,6 @@ func (rf *Raft) handleAppendEntriesResponse(server int, res AppendEntriesRespons
 	} else {
 		rf.nextIndex[server] = res.FirstIndex
 	}
-
 	go rf.updateCommitIndex()
 }
 
@@ -569,13 +582,13 @@ func (rf *Raft) InstallSnapshot(req *InstallSnapshotRequest, res *InstallSnapsho
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	//log.Printf("server %s recieves snapshot rpc: %v", rf.ID, req)
 	res.Term = rf.currentTerm
 	if rf.currentTerm <= req.Term {
 		rf.convertToFollower(req.Term)
 		rf.lastHeartBeat = time.Now()
 		rf.leader = req.LeaderId
 		rf.resetCh <- struct{}{}
-		return
 	}
 
 	// reject old snapshot
@@ -594,7 +607,7 @@ func (rf *Raft) InstallSnapshot(req *InstallSnapshotRequest, res *InstallSnapsho
 	rf.log.DiscardLogBefore(req.LastIncludedIndex + 1)
 	rf.commitIndex = req.LastIncludedIndex
 	rf.lastApplied = req.LastIncludedIndex
-	rf.applyCh <- ApplyMsg{true, nil, int(rf.lastApplied), false, false}
+	//rf.applyCh <- ApplyMsg{true, nil, int(rf.lastApplied), false, false}
 
 	rf.persist()
 }
@@ -680,6 +693,7 @@ func (rf *Raft) broadcast() {
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
+				//log.Println(rf.nextIndex)
 				if rf.nextIndex[server] <= rf.log.LastIncludedIndex {
 					var response InstallSnapshotResponse
 					if rf.sendInstallSnapshot(server, rf.NewInstallSnapshotRequest(), &response) {
@@ -731,6 +745,7 @@ func (rf *Raft) updateCommitIndex() {
 	copy(sorted, rf.matchIndex)
 	sort.Sort(UintSlice(sorted))
 
+	//log.Println(rf.matchIndex)
 	index := sorted[len(sorted)/2]
 	if rf.commitIndex < index && rf.log.Entry(index).Term == rf.currentTerm {
 		rf.commitIndex = index
@@ -746,32 +761,34 @@ func (rf *Raft) apply() {
 	var applyMsg []ApplyMsg
 	lastApplied := rf.lastApplied
 	for lastApplied < rf.commitIndex {
-		//log.Printf("commit index of server %v: %v", rf.ID, rf.commitIndex)
-		//if rf.state == Leader {
-		//log.Printf("log of server %v: %v", rf.me, rf.log.Entries)
-		//}
 		lastApplied++
 		apply := rf.log.Apply(lastApplied, lastApplied < rf.recover)
 		applyMsg = append(applyMsg, apply)
 	}
-	//log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
+	//log.Printf("commit index of server %v: %v", rf.ID, rf.commitIndex)
+	log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
 	rf.mu.Unlock()
 
 	//logger.Printf("apply message of server %v: %v", rf.ID, applyMsg)
 
 	for i, msg := range applyMsg {
 		select {
-		case <-time.After(time.Second):
+		case <-time.After(5 * time.Second):
 			rf.lastApplied += uint64(i)
+			go rf.snapshot()
 			return
 		default:
 			rf.applyCh <- msg
 		}
 	}
 	rf.lastApplied = lastApplied
+	go rf.snapshot()
+}
 
-	if rf.persister.RaftStateSize() >= int(rf.log.MaxSize) && rf.log.MaxSize != 0 {
-		go rf.createSnapshot(lastApplied)
+func (rf *Raft) snapshot() {
+	if rf.persister.RaftStateSize() >= int(rf.log.MaxSize) && rf.log.MaxSize != 0 && !rf.snapshotting {
+		rf.snapshotting = true
+		rf.createSnapshot(rf.lastApplied)
 	}
 }
 
@@ -910,7 +927,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) Read() error {
 	readIndex := rf.commitIndex
-	if readIndex == 0 {
+	if readIndex < rf.recover {
 		readIndex = rf.recover
 	}
 
@@ -968,7 +985,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = NewLog()
 	rf.resetCh = make(chan struct{})
 	rf.SnapshotCh = make(chan struct{})
-	rf.Done = make(chan struct{})
+	rf.SnapshotDone = make(chan struct{})
 
 	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	rf.electionTimeout = time.Millisecond * time.Duration(400+rand.Intn(200))
@@ -990,6 +1007,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	//log.Printf("")
+	rf.commitIndex = rf.log.LastIncludedIndex
+	rf.lastApplied = rf.log.LastIncludedIndex
 
 	return rf
 }
