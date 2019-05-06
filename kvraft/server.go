@@ -128,7 +128,8 @@ func (kv *KVServer) createSnapshot() {
 	e.Encode(kv.executed)
 	e.Encode(kv.db)
 	data := w.Bytes()
-	kv.rf.SaveSnapshot(data)
+	kv.rf.SnapshotData <- data
+	//kv.rf.SaveSnapshot(data)
 }
 
 func (kv *KVServer) readSnapshot(data []byte) {
@@ -167,7 +168,7 @@ func (kv *KVServer) apply() {
 			}
 		case <-kv.rf.SnapshotCh:
 			kv.createSnapshot()
-			kv.rf.SnapshotDone <- struct{}{}
+			//kv.rf.SnapshotData <- struct{}{}
 		}
 	}
 }

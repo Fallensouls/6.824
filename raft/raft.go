@@ -105,7 +105,7 @@ type Raft struct {
 	lastHeartBeat   time.Time // timestamp of last heartbeat
 	snapshotting    bool
 	SnapshotCh      chan struct{}
-	SnapshotDone    chan struct{}
+	SnapshotData    chan []byte
 	resetCh         chan struct{} // signal for converting to Follower and reset election ticker
 	applyCh         chan ApplyMsg
 }
@@ -148,20 +148,23 @@ func (rf *Raft) createSnapshot(index uint64) {
 	rf.SnapshotCh <- struct{}{}
 
 	select {
-	case <-rf.SnapshotDone:
+	case data := <-rf.SnapshotData:
+		rf.mu.Lock()
 		term := rf.log.Entry(index).Term
 		rf.log.DiscardLogBefore(index + 1)
 		rf.log.SetLastIncludedIndex(index)
 		rf.log.SetLastIncludedTerm(term)
 		rf.snapshotting = false
+		rf.persister.SaveStateAndSnapshot(rf.nodeState(), data)
+		rf.mu.Unlock()
 	case <-time.After(time.Second):
 		break
 	}
 }
 
-func (rf *Raft) SaveSnapshot(data []byte) {
-	rf.persister.SaveStateAndSnapshot(rf.nodeState(), data)
-}
+//func (rf *Raft) SaveSnapshot(data []byte) {
+//	rf.persister.SaveStateAndSnapshot(rf.nodeState(), data)
+//}
 
 func (rf *Raft) ReadSnapshot() []byte {
 	return rf.persister.ReadSnapshot()
@@ -985,7 +988,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = NewLog()
 	rf.resetCh = make(chan struct{})
 	rf.SnapshotCh = make(chan struct{})
-	rf.SnapshotDone = make(chan struct{})
+	rf.SnapshotData = make(chan []byte)
 
 	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	rf.electionTimeout = time.Millisecond * time.Duration(400+rand.Intn(200))
