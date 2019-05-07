@@ -143,12 +143,14 @@ func (kv *KVServer) readSnapshot(data []byte) {
 	d.Decode(&kv.db)
 }
 
-func (kv *KVServer) apply() {
+func (kv *KVServer) eventLoop() {
 	for {
 		select {
+		// apply commands
 		case msg, ok := <-kv.applyCh:
 			if ok && !msg.NoOpCommand {
 				op := msg.Command.(Op)
+				//log.Printf("command of server %v: %v", kv.rf.ID, op)
 				if seq := kv.executed[op.ID]; seq < op.Seq {
 					kv.mu.Lock()
 					switch op.Operation {
@@ -166,6 +168,7 @@ func (kv *KVServer) apply() {
 					}
 				}
 			}
+		// create snapshots
 		case <-kv.rf.SnapshotCh:
 			kv.createSnapshot()
 			//kv.rf.SnapshotData <- struct{}{}
@@ -219,7 +222,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	log.Printf("db of server %v: %v", kv.rf.ID, kv.db)
 	log.Printf("executed of server %v: %v", kv.rf.ID, kv.executed)
-	go kv.apply()
+	go kv.eventLoop()
 
 	return kv
 }

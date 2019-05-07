@@ -137,39 +137,6 @@ func (rf *Raft) SetMaxSize(maxSize int) {
 	rf.log.MaxSize = uint64(maxSize)
 }
 
-func (rf *Raft) createSnapshot(index uint64) {
-	log.Printf("server %v creates snapshot at index %v", rf.ID, index)
-	if index > rf.lastApplied+1 {
-		log.Panicf("can not create snapshot with log entries that haven't been applied")
-	}
-	if index <= rf.log.LastIncludedIndex {
-		return
-	}
-	rf.SnapshotCh <- struct{}{}
-
-	select {
-	case data := <-rf.SnapshotData:
-		rf.mu.Lock()
-		term := rf.log.Entry(index).Term
-		rf.log.DiscardLogBefore(index + 1)
-		rf.log.SetLastIncludedIndex(index)
-		rf.log.SetLastIncludedTerm(term)
-		rf.snapshotting = false
-		rf.persister.SaveStateAndSnapshot(rf.nodeState(), data)
-		rf.mu.Unlock()
-	case <-time.After(time.Second):
-		break
-	}
-}
-
-//func (rf *Raft) SaveSnapshot(data []byte) {
-//	rf.persister.SaveStateAndSnapshot(rf.nodeState(), data)
-//}
-
-func (rf *Raft) ReadSnapshot() []byte {
-	return rf.persister.ReadSnapshot()
-}
-
 /*
 *****************************
 *      State Transition     *
@@ -247,9 +214,7 @@ func (rf *Raft) nodeState() []byte {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
-	if rf.recover < rf.lastApplied {
-		rf.recover = rf.lastApplied
-	}
+	rf.recover = rf.log.LastIndex()
 	e.Encode(rf.recover)
 	return w.Bytes()
 }
@@ -463,7 +428,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//logger.Printf("server %v receives request: %v", rf.ID, req)
+	logger.Printf("server %v receives request: %v", rf.ID, req)
 
 	// return receiver's currentTerm for Candidate to update itself.
 	res.Term = rf.currentTerm
@@ -768,11 +733,9 @@ func (rf *Raft) apply() {
 		apply := rf.log.Apply(lastApplied, lastApplied < rf.recover)
 		applyMsg = append(applyMsg, apply)
 	}
-	//log.Printf("commit index of server %v: %v", rf.ID, rf.commitIndex)
+	log.Printf("commit index of server %v: %v", rf.ID, rf.commitIndex)
 	log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
 	rf.mu.Unlock()
-
-	//logger.Printf("apply message of server %v: %v", rf.ID, applyMsg)
 
 	for i, msg := range applyMsg {
 		select {
@@ -793,6 +756,36 @@ func (rf *Raft) snapshot() {
 		rf.snapshotting = true
 		rf.createSnapshot(rf.lastApplied)
 	}
+}
+
+func (rf *Raft) createSnapshot(index uint64) {
+	log.Printf("server %v creates snapshot at index %v", rf.ID, index)
+	if index > rf.lastApplied+1 {
+		log.Panicf("can not create snapshot with log entries that haven't been applied")
+	}
+	if index <= rf.log.LastIncludedIndex {
+		rf.snapshotting = false
+		return
+	}
+	rf.SnapshotCh <- struct{}{}
+
+	select {
+	case data := <-rf.SnapshotData:
+		rf.mu.Lock()
+		term := rf.log.Entry(index).Term
+		rf.log.DiscardLogBefore(index + 1)
+		rf.log.SetLastIncludedIndex(index)
+		rf.log.SetLastIncludedTerm(term)
+		rf.persister.SaveStateAndSnapshot(rf.nodeState(), data)
+		rf.mu.Unlock()
+	case <-time.After(time.Second):
+		break
+	}
+	rf.snapshotting = false
+}
+
+func (rf *Raft) ReadSnapshot() []byte {
+	return rf.persister.ReadSnapshot()
 }
 
 /*
@@ -1010,9 +1003,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	//log.Printf("")
 	rf.commitIndex = rf.log.LastIncludedIndex
 	rf.lastApplied = rf.log.LastIncludedIndex
-
+	log.Printf("log of server %v: %v", rf.ID, rf.log)
 	return rf
 }
