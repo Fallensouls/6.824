@@ -41,9 +41,10 @@ type KVServer struct {
 	persister    *raft.Persister
 
 	// Your definitions here.
-	done     chan int
-	db       map[string]string // key-value database
-	executed map[string]uint64 // the set of commands which have been executed
+	lastApplied uint64
+	done        chan int
+	db          map[string]string // key-value database
+	executed    map[string]uint64 // the set of commands which have been executed
 }
 
 func (kv *KVServer) Get(req *GetRequest, res *GetResponse) {
@@ -121,14 +122,19 @@ func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 	}
 }
 
-func (kv *KVServer) createSnapshot() {
+func (kv *KVServer) createSnapshot(index uint64) {
 	//log.Printf("server %s creates snapshot...", kv.rf.ID)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
+	kv.mu.RLock()
+	if kv.rf.State() == raft.Leader {
+		log.Printf("database of server %v: %v", kv.rf.ID, kv.db)
+	}
 	e.Encode(kv.executed)
 	e.Encode(kv.db)
+	kv.mu.RUnlock()
 	data := w.Bytes()
-	kv.rf.SnapshotData <- data
+	kv.rf.SnapshotData <- raft.Snapshot{Index: index, Data: data}
 	//kv.rf.SaveSnapshot(data)
 }
 
@@ -150,7 +156,6 @@ func (kv *KVServer) eventLoop() {
 		case msg, ok := <-kv.applyCh:
 			if ok && !msg.NoOpCommand {
 				op := msg.Command.(Op)
-				//log.Printf("command of server %v: %v", kv.rf.ID, op)
 				if seq := kv.executed[op.ID]; seq < op.Seq {
 					kv.mu.Lock()
 					switch op.Operation {
@@ -166,12 +171,17 @@ func (kv *KVServer) eventLoop() {
 					if kv.rf.State() == raft.Leader && !msg.Recover {
 						kv.done <- msg.CommandIndex
 					}
+					kv.lastApplied = uint64(msg.CommandIndex)
+					log.Printf("msg of server %v: %v", kv.rf.ID, msg)
 				}
 			}
+		// read snapshots from leader
+		case index := <-kv.rf.InstallSnapshotCh:
+			kv.readSnapshot(kv.rf.ReadSnapshot())
+			kv.lastApplied = index
 		// create snapshots
 		case <-kv.rf.SnapshotCh:
-			kv.createSnapshot()
-			//kv.rf.SnapshotData <- struct{}{}
+			kv.createSnapshot(kv.lastApplied)
 		}
 	}
 }

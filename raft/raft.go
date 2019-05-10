@@ -52,6 +52,14 @@ type ApplyMsg struct {
 	Recover      bool
 }
 
+type commandType uint8
+
+const (
+	NoOp commandType = 1 << iota
+	Recover
+	Snapshots
+)
+
 type State uint8
 
 const (
@@ -69,6 +77,11 @@ var (
 	ErrPartitioned = errors.New("network partitions")
 	ErrTimeout     = errors.New("timeout")
 )
+
+type Snapshot struct {
+	Index uint64
+	Data  []byte
+}
 
 //
 // A Go object implementing a single Raft peer.
@@ -100,14 +113,16 @@ type Raft struct {
 	nextIndex  []uint64
 	matchIndex []uint64
 
-	recover         uint64 // last applied index before the server crashes
-	electionTimeout time.Duration
-	lastHeartBeat   time.Time // timestamp of last heartbeat
-	snapshotting    bool
-	SnapshotCh      chan struct{}
-	SnapshotData    chan []byte
-	resetCh         chan struct{} // signal for converting to Follower and reset election ticker
-	applyCh         chan ApplyMsg
+	recover           uint64 // last applied index before the server crashes
+	electionTimeout   time.Duration
+	lastHeartBeat     time.Time // timestamp of last heartbeat
+	snapshotting      bool
+	SnapshotCh        chan struct{}
+	InstallSnapshotCh chan uint64
+	SnapshotData      chan Snapshot
+	resetCh           chan struct{} // signal for converting to Follower and reset election ticker
+	applyReqCh        chan struct{}
+	applyCh           chan ApplyMsg
 }
 
 /*
@@ -214,7 +229,9 @@ func (rf *Raft) nodeState() []byte {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
-	rf.recover = rf.log.LastIndex()
+	if rf.recover < rf.lastApplied {
+		rf.recover = rf.lastApplied
+	}
 	e.Encode(rf.recover)
 	return w.Bytes()
 }
@@ -428,7 +445,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	logger.Printf("server %v receives request: %v", rf.ID, req)
+	//logger.Printf("server %v receives request: %v", rf.ID, req)
 
 	// return receiver's currentTerm for Candidate to update itself.
 	res.Term = rf.currentTerm
@@ -450,13 +467,14 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 		// reply false if receiver's log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm.
 		entry := rf.log.Entry(req.PrevLogIndex)
 		if entry == nil {
-			// Leader has more logs, let nextIndex be the last index of receiver.
+			// Leader has more logs, let nextIndex be the last index of receiver plus one.
 			res.FirstIndex = rf.log.LastIndex() + 1
 			return
 		}
 		if entry.Term != req.PrevLogTerm {
 			// there are conflicting entries
-			res.FirstIndex = rf.log.SearchFirstIndex(req.PrevLogIndex, entry.Term)
+			//res.FirstIndex = rf.log.SearchFirstIndex(req.PrevLogIndex, entry.Term)
+			res.FirstIndex = req.PrevLogIndex - 1
 			res.ConflictTerm = entry.Term
 			return
 		}
@@ -485,7 +503,8 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesRespo
 		res.Index = req.Entries[len(req.Entries)-1].Index
 	}
 
-	go rf.apply()
+	//go rf.apply()
+	rf.applyReqCh <- struct{}{}
 	rf.persist()
 }
 
@@ -576,7 +595,7 @@ func (rf *Raft) InstallSnapshot(req *InstallSnapshotRequest, res *InstallSnapsho
 	rf.commitIndex = req.LastIncludedIndex
 	rf.lastApplied = req.LastIncludedIndex
 	//rf.applyCh <- ApplyMsg{true, nil, int(rf.lastApplied), false, false}
-
+	rf.InstallSnapshotCh <- rf.log.LastIncludedIndex
 	rf.persist()
 }
 
@@ -717,7 +736,8 @@ func (rf *Raft) updateCommitIndex() {
 	index := sorted[len(sorted)/2]
 	if rf.commitIndex < index && rf.log.Entry(index).Term == rf.currentTerm {
 		rf.commitIndex = index
-		go rf.apply()
+		//go rf.apply()
+		rf.applyReqCh <- struct{}{}
 	}
 	//logger.Printf("commit index of Leader: %v", rf.commitIndex)
 	//logger.Printf("entries of Leader: %v", rf.log.Entries)
@@ -725,58 +745,87 @@ func (rf *Raft) updateCommitIndex() {
 }
 
 func (rf *Raft) apply() {
-	rf.mu.Lock()
-	var applyMsg []ApplyMsg
-	lastApplied := rf.lastApplied
-	for lastApplied < rf.commitIndex {
-		lastApplied++
-		apply := rf.log.Apply(lastApplied, lastApplied < rf.recover)
-		applyMsg = append(applyMsg, apply)
-	}
-	log.Printf("commit index of server %v: %v", rf.ID, rf.commitIndex)
-	log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
-	rf.mu.Unlock()
-
-	for i, msg := range applyMsg {
+	//rf.mu.Lock()
+	for {
 		select {
-		case <-time.After(5 * time.Second):
-			rf.lastApplied += uint64(i)
-			go rf.snapshot()
-			return
-		default:
-			rf.applyCh <- msg
+		case <-rf.applyReqCh:
+			rf.mu.Lock()
+			var applyMsg []ApplyMsg
+			lastApplied := rf.lastApplied
+			for lastApplied < rf.commitIndex {
+				lastApplied++
+				apply := rf.log.Apply(lastApplied, lastApplied < rf.recover)
+				applyMsg = append(applyMsg, apply)
+			}
+			log.Printf("apply message of server %v: %v", rf.ID, applyMsg)
+			log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
+			rf.mu.Unlock()
+			if len(applyMsg) != 0 {
+			loop:
+				for _, msg := range applyMsg {
+					select {
+					case <-time.After(5 * time.Second):
+						break loop
+					default:
+						rf.applyCh <- msg
+						rf.lastApplied = uint64(msg.CommandIndex)
+						log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
+					}
+				}
+				//log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
+				if rf.needSnapshot() {
+					rf.snapshotting = true
+					go func() {
+						rf.SnapshotCh <- struct{}{}
+						rf.createSnapshot()
+					}()
+				}
+			}
 		}
 	}
-	rf.lastApplied = lastApplied
-	go rf.snapshot()
+}
+
+func (rf *Raft) needSnapshot() bool {
+	return rf.persister.RaftStateSize() >= int(rf.log.MaxSize) && rf.log.MaxSize != 0 && !rf.snapshotting
 }
 
 func (rf *Raft) snapshot() {
-	if rf.persister.RaftStateSize() >= int(rf.log.MaxSize) && rf.log.MaxSize != 0 && !rf.snapshotting {
-		rf.snapshotting = true
-		rf.createSnapshot(rf.lastApplied)
-	}
+	//var index uint64
+	//if rf.State() == Leader {
+	//	sorted := make([]uint64, len(rf.matchIndex))
+	//	copy(sorted, rf.matchIndex)
+	//	applied := rf.lastApplied
+	//
+	//	sort.Sort(UintSlice(sorted))
+	//	index = sorted[0]
+	//	if index > applied {
+	//		index = applied
+	//	}
+	//} else {
+	//	index = rf.lastApplied
+	//}
+	//rf.snapshotting = true
+	rf.createSnapshot()
 }
 
-func (rf *Raft) createSnapshot(index uint64) {
-	log.Printf("server %v creates snapshot at index %v", rf.ID, index)
-	if index > rf.lastApplied+1 {
-		log.Panicf("can not create snapshot with log entries that haven't been applied")
-	}
-	if index <= rf.log.LastIncludedIndex {
-		rf.snapshotting = false
-		return
-	}
-	rf.SnapshotCh <- struct{}{}
-
+func (rf *Raft) createSnapshot() {
 	select {
-	case data := <-rf.SnapshotData:
+	case snapshot := <-rf.SnapshotData:
+		log.Printf("server %v creates snapshot at index %v", rf.ID, snapshot.Index)
+		log.Println(rf.lastApplied)
+		if snapshot.Index > rf.lastApplied {
+			log.Panicf("can not create snapshot with log entries that haven't been applied")
+		}
+		if snapshot.Index <= rf.log.LastIncludedIndex {
+			rf.snapshotting = false
+			return
+		}
 		rf.mu.Lock()
-		term := rf.log.Entry(index).Term
-		rf.log.DiscardLogBefore(index + 1)
-		rf.log.SetLastIncludedIndex(index)
+		term := rf.log.Entry(snapshot.Index).Term
+		rf.log.DiscardLogBefore(snapshot.Index + 1)
+		rf.log.SetLastIncludedIndex(snapshot.Index)
 		rf.log.SetLastIncludedTerm(term)
-		rf.persister.SaveStateAndSnapshot(rf.nodeState(), data)
+		rf.persister.SaveStateAndSnapshot(rf.nodeState(), snapshot.Data)
 		rf.mu.Unlock()
 	case <-time.After(time.Second):
 		break
@@ -981,7 +1030,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = NewLog()
 	rf.resetCh = make(chan struct{})
 	rf.SnapshotCh = make(chan struct{})
-	rf.SnapshotData = make(chan []byte)
+	rf.InstallSnapshotCh = make(chan uint64)
+	rf.SnapshotData = make(chan Snapshot)
+	rf.applyReqCh = make(chan struct{}, 20)
 
 	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	rf.electionTimeout = time.Millisecond * time.Duration(400+rand.Intn(200))
@@ -1005,6 +1056,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	rf.commitIndex = rf.log.LastIncludedIndex
 	rf.lastApplied = rf.log.LastIncludedIndex
-	log.Printf("log of server %v: %v", rf.ID, rf.log)
+	//log.Printf("log of server %v: %v", rf.ID, rf.log)
+	go rf.apply()
 	return rf
 }
