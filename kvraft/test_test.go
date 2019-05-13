@@ -257,7 +257,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				cfg.StartServer(i)
 			}
 			cfg.ConnectAll()
-			//time.Sleep(3 * time.Second)
+			//time.Sleep(15 * time.Millisecond)
 		}
 
 		// log.Printf("wait for clients\n")

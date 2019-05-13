@@ -745,7 +745,6 @@ func (rf *Raft) updateCommitIndex() {
 }
 
 func (rf *Raft) apply() {
-	//rf.mu.Lock()
 	for {
 		select {
 		case <-rf.applyReqCh:
@@ -757,7 +756,7 @@ func (rf *Raft) apply() {
 				apply := rf.log.Apply(lastApplied, lastApplied < rf.recover)
 				applyMsg = append(applyMsg, apply)
 			}
-			log.Printf("apply message of server %v: %v", rf.ID, applyMsg)
+			//log.Printf("apply message of server %v: %v", rf.ID, applyMsg)
 			log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
 			rf.mu.Unlock()
 			if len(applyMsg) != 0 {
@@ -769,16 +768,14 @@ func (rf *Raft) apply() {
 					default:
 						rf.applyCh <- msg
 						rf.lastApplied = uint64(msg.CommandIndex)
-						log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
+						//log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
 					}
 				}
-				//log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
+				log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
 				if rf.needSnapshot() {
 					rf.snapshotting = true
-					go func() {
-						rf.SnapshotCh <- struct{}{}
-						rf.createSnapshot()
-					}()
+					rf.SnapshotCh <- struct{}{}
+					rf.createSnapshot()
 				}
 			}
 		}
@@ -789,43 +786,21 @@ func (rf *Raft) needSnapshot() bool {
 	return rf.persister.RaftStateSize() >= int(rf.log.MaxSize) && rf.log.MaxSize != 0 && !rf.snapshotting
 }
 
-func (rf *Raft) snapshot() {
-	//var index uint64
-	//if rf.State() == Leader {
-	//	sorted := make([]uint64, len(rf.matchIndex))
-	//	copy(sorted, rf.matchIndex)
-	//	applied := rf.lastApplied
-	//
-	//	sort.Sort(UintSlice(sorted))
-	//	index = sorted[0]
-	//	if index > applied {
-	//		index = applied
-	//	}
-	//} else {
-	//	index = rf.lastApplied
-	//}
-	//rf.snapshotting = true
-	rf.createSnapshot()
-}
-
 func (rf *Raft) createSnapshot() {
 	select {
 	case snapshot := <-rf.SnapshotData:
+		rf.mu.Lock()
 		log.Printf("server %v creates snapshot at index %v", rf.ID, snapshot.Index)
-		log.Println(rf.lastApplied)
 		if snapshot.Index > rf.lastApplied {
 			log.Panicf("can not create snapshot with log entries that haven't been applied")
 		}
-		if snapshot.Index <= rf.log.LastIncludedIndex {
-			rf.snapshotting = false
-			return
+		if snapshot.Index > rf.log.LastIncludedIndex {
+			term := rf.log.Entry(snapshot.Index).Term
+			rf.log.DiscardLogBefore(snapshot.Index + 1)
+			rf.log.SetLastIncludedIndex(snapshot.Index)
+			rf.log.SetLastIncludedTerm(term)
+			rf.persister.SaveStateAndSnapshot(rf.nodeState(), snapshot.Data)
 		}
-		rf.mu.Lock()
-		term := rf.log.Entry(snapshot.Index).Term
-		rf.log.DiscardLogBefore(snapshot.Index + 1)
-		rf.log.SetLastIncludedIndex(snapshot.Index)
-		rf.log.SetLastIncludedTerm(term)
-		rf.persister.SaveStateAndSnapshot(rf.nodeState(), snapshot.Data)
 		rf.mu.Unlock()
 	case <-time.After(time.Second):
 		break
@@ -991,7 +966,7 @@ func (rf *Raft) Read() error {
 		default:
 		}
 	}
-	//log.Printf("last applied: %v", rf.lastApplied)
+	log.Printf("last applied: %v", rf.lastApplied)
 	return nil
 }
 
@@ -1056,7 +1031,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	rf.commitIndex = rf.log.LastIncludedIndex
 	rf.lastApplied = rf.log.LastIncludedIndex
-	//log.Printf("log of server %v: %v", rf.ID, rf.log)
+	rf.recover++
+	log.Printf("recover of server %v: %v", rf.ID, rf.recover)
 	go rf.apply()
 	return rf
 }

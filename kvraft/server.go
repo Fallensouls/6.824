@@ -127,9 +127,9 @@ func (kv *KVServer) createSnapshot(index uint64) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	kv.mu.RLock()
-	if kv.rf.State() == raft.Leader {
-		log.Printf("database of server %v: %v", kv.rf.ID, kv.db)
-	}
+	//if kv.rf.State() == raft.Leader {
+	log.Printf("database of server %v: %v", kv.rf.ID, kv.db)
+	//}
 	e.Encode(kv.executed)
 	e.Encode(kv.db)
 	kv.mu.RUnlock()
