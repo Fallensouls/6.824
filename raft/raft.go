@@ -229,10 +229,6 @@ func (rf *Raft) nodeState() []byte {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
-	if rf.recover < rf.lastApplied {
-		rf.recover = rf.lastApplied
-	}
-	e.Encode(rf.recover)
 	return w.Bytes()
 }
 
@@ -258,8 +254,6 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&rf.currentTerm)
 	d.Decode(&rf.votedFor)
 	d.Decode(rf.log)
-	d.Decode(&rf.recover)
-	//d.Decode(&rf.lastApplied)
 }
 
 /*
@@ -966,7 +960,7 @@ func (rf *Raft) Read() error {
 		default:
 		}
 	}
-	log.Printf("last applied: %v", rf.lastApplied)
+	//log.Printf("last applied: %v", rf.lastApplied)
 	return nil
 }
 
@@ -1031,8 +1025,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	rf.commitIndex = rf.log.LastIncludedIndex
 	rf.lastApplied = rf.log.LastIncludedIndex
-	rf.recover++
-	log.Printf("recover of server %v: %v", rf.ID, rf.recover)
+	rf.recover = rf.log.LastIndex()
+
 	go rf.apply()
 	return rf
 }
