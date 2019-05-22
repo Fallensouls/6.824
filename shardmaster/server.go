@@ -25,18 +25,48 @@ type Op struct {
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
+	sm.mu.Lock()
+	newConfig := Config{Groups: make(map[int][]string)}
+	oldConfig := sm.configs[len(sm.configs)-1]
+	for key, value := range oldConfig.Groups {
+		newConfig.Groups[key] = value
+	}
+	for key, value := range args.Servers {
+		newConfig.Groups[key] = value
+	}
+	newConfig.Num = oldConfig.Num + 1
+	newConfig.Shards = oldConfig.Shards
+	sm.configs = append(sm.configs, newConfig)
+	sm.mu.Unlock()
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
+	sm.mu.Lock()
+	newConfig := Config{Groups: make(map[int][]string)}
+	oldConfig := sm.configs[len(sm.configs)-1]
+	for key, value := range oldConfig.Groups {
+		newConfig.Groups[key] = value
+	}
+	for _, gid := range args.GIDs {
+		delete(newConfig.Groups, gid)
+	}
+	newConfig.Num = oldConfig.Num + 1
+	newConfig.Shards = oldConfig.Shards
+	sm.configs = append(sm.configs, newConfig)
+	sm.mu.Unlock()
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
+	sm.mu.Lock()
+	sm.mu.Unlock()
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
+	sm.mu.Lock()
+	sm.mu.Unlock()
 }
 
 //

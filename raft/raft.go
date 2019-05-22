@@ -52,14 +52,6 @@ type ApplyMsg struct {
 	Recover      bool
 }
 
-type commandType uint8
-
-const (
-	NoOp commandType = 1 << iota
-	Recover
-	Snapshots
-)
-
 type State uint8
 
 const (
