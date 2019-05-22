@@ -155,24 +155,25 @@ func (kv *KVServer) eventLoop() {
 		// apply commands
 		case msg, ok := <-kv.applyCh:
 			if ok && !msg.NoOpCommand {
-				op := msg.Command.(Op)
-				if seq := kv.executed[op.ID]; seq < op.Seq {
-					kv.mu.Lock()
-					switch op.Operation {
-					case "Put":
-						kv.db[op.Key] = op.Value
-						kv.executed[op.ID] = op.Seq
-					case "Append":
-						kv.db[op.Key] += op.Value
-						kv.executed[op.ID] = op.Seq
-					default:
+				if op, ok := msg.Command.(Op); ok {
+					if kv.executed[op.ID] < op.Seq {
+						kv.mu.Lock()
+						switch op.Operation {
+						case "Put":
+							kv.db[op.Key] = op.Value
+							kv.executed[op.ID] = op.Seq
+						case "Append":
+							kv.db[op.Key] += op.Value
+							kv.executed[op.ID] = op.Seq
+						default:
+						}
+						kv.mu.Unlock()
+						if kv.rf.State() == raft.Leader && !msg.Recover {
+							kv.done <- msg.CommandIndex
+						}
+						kv.lastApplied = uint64(msg.CommandIndex)
+						log.Printf("msg of server %v: %v", kv.rf.ID, msg)
 					}
-					kv.mu.Unlock()
-					if kv.rf.State() == raft.Leader && !msg.Recover {
-						kv.done <- msg.CommandIndex
-					}
-					kv.lastApplied = uint64(msg.CommandIndex)
-					log.Printf("msg of server %v: %v", kv.rf.ID, msg)
 				}
 			}
 		// read snapshots from leader

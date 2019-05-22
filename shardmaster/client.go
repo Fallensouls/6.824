@@ -2,6 +2,7 @@ package shardmaster
 
 import (
 	"crypto/rand"
+	"github.com/Fallensouls/raft/raft"
 	"math/big"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	id  string
+	seq uint64
 }
 
 func nrand() int64 {
@@ -28,13 +31,18 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.id = raft.RandomID(8)
+	ck.seq = 1
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
 	args := &QueryArgs{}
 	// Your code here.
+	ck.seq++
+	args.Seq = ck.seq
 	args.Num = num
+	args.ID = ck.id
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -51,8 +59,10 @@ func (ck *Clerk) Query(num int) Config {
 func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
 	// Your code here.
+	ck.seq++
+	args.Seq = ck.seq
 	args.Servers = servers
-
+	args.ID = ck.id
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -69,8 +79,10 @@ func (ck *Clerk) Join(servers map[int][]string) {
 func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
 	// Your code here.
+	ck.seq++
+	args.Seq = ck.seq
 	args.GIDs = gids
-
+	args.ID = ck.id
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -87,9 +99,11 @@ func (ck *Clerk) Leave(gids []int) {
 func (ck *Clerk) Move(shard int, gid int) {
 	args := &MoveArgs{}
 	// Your code here.
+	ck.seq++
+	args.Seq = ck.seq
 	args.Shard = shard
 	args.GID = gid
-
+	args.ID = ck.id
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {

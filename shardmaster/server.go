@@ -15,17 +15,25 @@ type ShardMaster struct {
 	applyCh chan raft.ApplyMsg
 
 	// Your data here.
-
-	configs []Config // indexed by config num
+	executed map[string]uint64
+	configs  []Config // indexed by config num
 }
 
 type Op struct {
 	// Your data here.
+	Config Config
+	ID     string
+	Seq    uint64
 }
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
 	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.rf.State() != raft.Leader {
+		reply.WrongLeader = true
+		return
+	}
 	newConfig := Config{Groups: make(map[int][]string)}
 	oldConfig := sm.configs[len(sm.configs)-1]
 	for key, value := range oldConfig.Groups {
@@ -36,13 +44,17 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	}
 	newConfig.Num = oldConfig.Num + 1
 	newConfig.Shards = oldConfig.Shards
-	sm.configs = append(sm.configs, newConfig)
-	sm.mu.Unlock()
+	sm.rf.Start(Op{Config: newConfig, ID: args.ID, Seq: args.Seq})
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
 	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.rf.State() != raft.Leader {
+		reply.WrongLeader = true
+		return
+	}
 	newConfig := Config{Groups: make(map[int][]string)}
 	oldConfig := sm.configs[len(sm.configs)-1]
 	for key, value := range oldConfig.Groups {
@@ -53,20 +65,55 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	}
 	newConfig.Num = oldConfig.Num + 1
 	newConfig.Shards = oldConfig.Shards
-	sm.configs = append(sm.configs, newConfig)
-	sm.mu.Unlock()
+	sm.rf.Start(Op{Config: newConfig, ID: args.ID, Seq: args.Seq})
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
 	sm.mu.Lock()
-	sm.mu.Unlock()
+	defer sm.mu.Unlock()
+	if sm.rf.State() != raft.Leader {
+		reply.WrongLeader = true
+		return
+	}
+	newConfig := Config{Groups: make(map[int][]string)}
+	oldConfig := sm.configs[len(sm.configs)-1]
+	for key, value := range oldConfig.Groups {
+		newConfig.Groups[key] = value
+	}
+	newConfig.Num = oldConfig.Num + 1
+	newConfig.Shards = oldConfig.Shards
+	newConfig.Shards[args.Shard] = args.GID
+	sm.rf.Start(Op{Config: newConfig, ID: args.ID, Seq: args.Seq})
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
 	sm.mu.Lock()
-	sm.mu.Unlock()
+	defer sm.mu.Unlock()
+	if sm.rf.State() != raft.Leader {
+		reply.WrongLeader = true
+		return
+	}
+	reply.Config = sm.configs[args.Num]
+}
+
+func (sm *ShardMaster) apply() {
+	for {
+		select {
+		case msg, ok := <-sm.applyCh:
+			if ok && msg.NoOpCommand {
+				if op, ok := msg.Command.(Op); ok {
+					if sm.executed[op.ID] < op.Seq {
+						sm.mu.Lock()
+						sm.configs = append(sm.configs, op.Config)
+						sm.executed[op.ID] = op.Seq
+						sm.mu.Unlock()
+					}
+				}
+			}
+		}
+	}
 }
 
 //
