@@ -28,15 +28,22 @@ type Op struct {
 	Seq    uint64
 }
 
+func (sm *ShardMaster) lastConfig() Config {
+	return sm.configs[len(sm.configs)]
+}
+
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
+	if sm.executed[args.ID] > args.Seq {
+		return
+	}
 	if sm.rf.State() != raft.Leader {
 		reply.WrongLeader = true
 		return
 	}
 	sm.mu.Lock()
 	newConfig := Config{Groups: make(map[int][]string)}
-	oldConfig := sm.configs[len(sm.configs)-1]
+	oldConfig := sm.lastConfig()
 	sm.mu.Unlock()
 	for key, value := range oldConfig.Groups {
 		newConfig.Groups[key] = value
@@ -64,13 +71,16 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
+	if sm.executed[args.ID] > args.Seq {
+		return
+	}
 	if sm.rf.State() != raft.Leader {
 		reply.WrongLeader = true
 		return
 	}
 	sm.mu.Lock()
 	newConfig := Config{Groups: make(map[int][]string)}
-	oldConfig := sm.configs[len(sm.configs)-1]
+	oldConfig := sm.lastConfig()
 	sm.mu.Unlock()
 	for key, value := range oldConfig.Groups {
 		newConfig.Groups[key] = value
@@ -98,13 +108,16 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
+	if sm.executed[args.ID] > args.Seq {
+		return
+	}
 	if sm.rf.State() != raft.Leader {
 		reply.WrongLeader = true
 		return
 	}
 	sm.mu.Lock()
 	newConfig := Config{Groups: make(map[int][]string)}
-	oldConfig := sm.configs[len(sm.configs)-1]
+	oldConfig := sm.lastConfig()
 	sm.mu.Unlock()
 	for key, value := range oldConfig.Groups {
 		newConfig.Groups[key] = value
@@ -129,6 +142,9 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
+	if sm.executed[args.ID] > args.Seq {
+		return
+	}
 	if sm.rf.State() != raft.Leader {
 		reply.WrongLeader = true
 		return
@@ -148,10 +164,84 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 }
 
 func (sm *ShardMaster) assignShards() {
-	//latestConfig := sm.configs[len(sm.configs)-1]
-	//avarage := NShards / len(latestConfig.Groups)
-	//remainder := NShards % len(latestConfig.Groups)
-	//
+	lastConfig := sm.lastConfig()
+	avarage := NShards / len(lastConfig.Groups)
+	oldAvarage := NShards / len(sm.configs[len(sm.configs)-2].Groups)
+	//remainder := NShards % len(lastConfig.Groups)
+	diff, same, less := sm.findGroupChange()
+	counts := sm.countShards()
+	var (
+		shards []int
+		gids   []int
+	)
+	// less groups
+	if less {
+		for _, gid := range diff {
+			shards = append(shards, counts[gid]...)
+		}
+		for i, shard := range shards {
+			sm.lastConfig().Shards[shard] = same[i%len(same)]
+		}
+	} else { // more groups
+		for _, gid := range diff {
+			gids = append(gids, gid)
+		}
+		var movedShards []int
+		for gid := range counts {
+			if len(counts[gid]) > oldAvarage {
+				movedShards = append(movedShards, counts[gid][0])
+				counts[gid] = counts[gid][1:]
+			}
+		}
+	outer:
+		for len(movedShards) < avarage*len(diff) {
+			var i int
+			for _, shards := range counts {
+				movedShards = append(movedShards, shards[i])
+				if len(movedShards) == avarage*len(diff) {
+					break outer
+				}
+			}
+			i++
+		}
+		for i, shard := range movedShards {
+			sm.lastConfig().Shards[shard] = diff[i%len(diff)]
+		}
+	}
+}
+
+func (sm *ShardMaster) findGroupChange() (diff []int, same []int, less bool) {
+	oldGroups := sm.configs[len(sm.configs)-2].Groups
+	latestGroups := sm.lastConfig().Groups
+	diffMap := make(map[int]bool)
+	//var same []int
+	for gid := range oldGroups {
+		diffMap[gid] = true
+	}
+
+	for gid := range latestGroups {
+		if _, ok := diffMap[gid]; ok {
+			delete(diffMap, gid)
+			same = append(same, gid)
+		} else {
+			diff = append(diff, gid)
+		}
+	}
+	if diff == nil {
+		less = true
+		for gid := range diffMap {
+			diff = append(diff, gid)
+		}
+	}
+	return
+}
+
+func (sm *ShardMaster) countShards() map[int][]int {
+	count := make(map[int][]int)
+	for shard, gid := range sm.configs[len(sm.configs)-1].Shards {
+		count[gid] = append(count[gid], shard)
+	}
+	return count
 }
 
 func (sm *ShardMaster) apply() {
@@ -163,6 +253,7 @@ func (sm *ShardMaster) apply() {
 					if sm.executed[op.ID] < op.Seq {
 						sm.mu.Lock()
 						sm.configs = append(sm.configs, op.Config)
+						sm.assignShards()
 						sm.executed[op.ID] = op.Seq
 						sm.mu.Unlock()
 						if sm.rf.State() == raft.Leader && !msg.Recover {
