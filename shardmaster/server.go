@@ -28,8 +28,8 @@ type Op struct {
 	Seq    uint64
 }
 
-func (sm *ShardMaster) lastConfig() Config {
-	return sm.configs[len(sm.configs)]
+func (sm *ShardMaster) lastConfig() *Config {
+	return &sm.configs[len(sm.configs)-1]
 }
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
@@ -57,7 +57,7 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	for {
 		select {
 		case doneIndex := <-sm.done:
-			log.Println(doneIndex)
+			//log.Println(doneIndex)
 			if doneIndex == index {
 				return
 			}
@@ -165,11 +165,27 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 
 func (sm *ShardMaster) assignShards() {
 	lastConfig := sm.lastConfig()
+	if len(lastConfig.Groups) == 0 {
+		for i := range lastConfig.Shards {
+			lastConfig.Shards[i] = 0
+		}
+		return
+	}
 	avarage := NShards / len(lastConfig.Groups)
+	if len(sm.configs[len(sm.configs)-2].Groups) == 0 {
+		for i := range lastConfig.Shards {
+			lastConfig.Shards[i] = (i % len(lastConfig.Groups)) + 1
+		}
+		return
+	}
 	oldAvarage := NShards / len(sm.configs[len(sm.configs)-2].Groups)
 	//remainder := NShards % len(lastConfig.Groups)
 	diff, same, less := sm.findGroupChange()
+	//log.Printf("different: %v", diff)
+	//log.Printf("same: %v", same)
+	//log.Printf("is less group: %v", less)
 	counts := sm.countShards()
+	//log.Printf("counts: %v", counts)
 	var (
 		shards []int
 		gids   []int
@@ -180,7 +196,7 @@ func (sm *ShardMaster) assignShards() {
 			shards = append(shards, counts[gid]...)
 		}
 		for i, shard := range shards {
-			sm.lastConfig().Shards[shard] = same[i%len(same)]
+			lastConfig.Shards[shard] = same[i%len(same)]
 		}
 	} else { // more groups
 		for _, gid := range diff {
@@ -193,21 +209,17 @@ func (sm *ShardMaster) assignShards() {
 				counts[gid] = counts[gid][1:]
 			}
 		}
-	outer:
-		for len(movedShards) < avarage*len(diff) {
-			var i int
+		for i := 0; len(movedShards) < avarage*len(diff); i++ {
 			for _, shards := range counts {
 				movedShards = append(movedShards, shards[i])
-				if len(movedShards) == avarage*len(diff) {
-					break outer
-				}
 			}
-			i++
 		}
+		movedShards = movedShards[:avarage*len(diff)]
 		for i, shard := range movedShards {
-			sm.lastConfig().Shards[shard] = diff[i%len(diff)]
+			lastConfig.Shards[shard] = diff[i%len(diff)]
 		}
 	}
+	//log.Printf("shards: %v", lastConfig.Shards)
 }
 
 func (sm *ShardMaster) findGroupChange() (diff []int, same []int, less bool) {
@@ -257,6 +269,7 @@ func (sm *ShardMaster) apply() {
 						sm.executed[op.ID] = op.Seq
 						sm.mu.Unlock()
 						if sm.rf.State() == raft.Leader && !msg.Recover {
+							log.Printf("index of command: %v", msg.CommandIndex)
 							sm.done <- msg.CommandIndex
 						}
 					}

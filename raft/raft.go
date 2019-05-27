@@ -754,7 +754,7 @@ func (rf *Raft) apply() {
 					default:
 						rf.applyCh <- msg
 						rf.lastApplied = uint64(msg.CommandIndex)
-						//log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
+						log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
 					}
 				}
 				log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
