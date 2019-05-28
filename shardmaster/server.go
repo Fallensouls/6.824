@@ -2,6 +2,7 @@ package shardmaster
 
 import (
 	"log"
+	"sort"
 	"sync"
 
 	"github.com/Fallensouls/raft/labgob"
@@ -23,9 +24,15 @@ type ShardMaster struct {
 
 type Op struct {
 	// Your data here.
-	Config Config
-	ID     string
-	Seq    uint64
+	//Config Config
+	ID   string
+	Seq  uint64
+	Type string // Join, Leave or Move
+
+	Servers map[int][]string
+	GIDs    []int
+	Shard   int
+	GID     int
 }
 
 func (sm *ShardMaster) lastConfig() *Config {
@@ -41,19 +48,19 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 		reply.WrongLeader = true
 		return
 	}
-	sm.mu.Lock()
-	newConfig := Config{Groups: make(map[int][]string)}
-	oldConfig := sm.lastConfig()
-	sm.mu.Unlock()
-	for key, value := range oldConfig.Groups {
-		newConfig.Groups[key] = value
-	}
-	for key, value := range args.Servers {
-		newConfig.Groups[key] = value
-	}
-	newConfig.Num = oldConfig.Num + 1
-	newConfig.Shards = oldConfig.Shards
-	index, _, _ := sm.rf.Start(Op{Config: newConfig, ID: args.ID, Seq: args.Seq})
+	//sm.mu.Lock()
+	//newConfig := Config{Groups: make(map[int][]string)}
+	//oldConfig := sm.lastConfig()
+	//sm.mu.Unlock()
+	//for key, value := range oldConfig.Groups {
+	//	newConfig.Groups[key] = value
+	//}
+	//for key, value := range args.Servers {
+	//	newConfig.Groups[key] = value
+	//}
+	//newConfig.Num = oldConfig.Num + 1
+	//newConfig.Shards = oldConfig.Shards
+	index, _, _ := sm.rf.Start(Op{ID: args.ID, Seq: args.Seq, Type: "Join", Servers: args.Servers})
 	for {
 		select {
 		case doneIndex := <-sm.done:
@@ -78,19 +85,19 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 		reply.WrongLeader = true
 		return
 	}
-	sm.mu.Lock()
-	newConfig := Config{Groups: make(map[int][]string)}
-	oldConfig := sm.lastConfig()
-	sm.mu.Unlock()
-	for key, value := range oldConfig.Groups {
-		newConfig.Groups[key] = value
-	}
-	for _, gid := range args.GIDs {
-		delete(newConfig.Groups, gid)
-	}
-	newConfig.Num = oldConfig.Num + 1
-	newConfig.Shards = oldConfig.Shards
-	index, _, _ := sm.rf.Start(Op{Config: newConfig, ID: args.ID, Seq: args.Seq})
+	//sm.mu.Lock()
+	//newConfig := Config{Groups: make(map[int][]string)}
+	//oldConfig := sm.lastConfig()
+	//sm.mu.Unlock()
+	//for key, value := range oldConfig.Groups {
+	//	newConfig.Groups[key] = value
+	//}
+	//for _, gid := range args.GIDs {
+	//	delete(newConfig.Groups, gid)
+	//}
+	//newConfig.Num = oldConfig.Num + 1
+	//newConfig.Shards = oldConfig.Shards
+	index, _, _ := sm.rf.Start(Op{ID: args.ID, Seq: args.Seq, Type: "Leave", GIDs: args.GIDs})
 	//timeout := time.NewTimer(10 * raft.HeartBeatInterval)
 	for {
 		select {
@@ -115,17 +122,17 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 		reply.WrongLeader = true
 		return
 	}
-	sm.mu.Lock()
-	newConfig := Config{Groups: make(map[int][]string)}
-	oldConfig := sm.lastConfig()
-	sm.mu.Unlock()
-	for key, value := range oldConfig.Groups {
-		newConfig.Groups[key] = value
-	}
-	newConfig.Num = oldConfig.Num + 1
-	newConfig.Shards = oldConfig.Shards
-	newConfig.Shards[args.Shard] = args.GID
-	index, _, _ := sm.rf.Start(Op{Config: newConfig, ID: args.ID, Seq: args.Seq})
+	//sm.mu.Lock()
+	//newConfig := Config{Groups: make(map[int][]string)}
+	//oldConfig := sm.lastConfig()
+	//sm.mu.Unlock()
+	//for key, value := range oldConfig.Groups {
+	//	newConfig.Groups[key] = value
+	//}
+	//newConfig.Num = oldConfig.Num + 1
+	//newConfig.Shards = oldConfig.Shards
+	//newConfig.Shards[args.Shard] = args.GID
+	index, _, _ := sm.rf.Start(Op{ID: args.ID, Seq: args.Seq, Type: "Move", Shard: args.Shard, GID: args.GID})
 	for {
 		select {
 		case doneIndex := <-sm.done:
@@ -163,7 +170,7 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	log.Printf("reply of query: %v", reply)
 }
 
-func (sm *ShardMaster) assignShards() {
+func (sm *ShardMaster) balance() {
 	lastConfig := sm.lastConfig()
 	if len(lastConfig.Groups) == 0 {
 		for i := range lastConfig.Shards {
@@ -173,8 +180,12 @@ func (sm *ShardMaster) assignShards() {
 	}
 	avarage := NShards / len(lastConfig.Groups)
 	if len(sm.configs[len(sm.configs)-2].Groups) == 0 {
+		var gids []int
+		for gid := range lastConfig.Groups {
+			gids = append(gids, gid)
+		}
 		for i := range lastConfig.Shards {
-			lastConfig.Shards[i] = (i % len(lastConfig.Groups)) + 1
+			lastConfig.Shards[i] = gids[i%len(gids)]
 		}
 		return
 	}
@@ -195,8 +206,21 @@ func (sm *ShardMaster) assignShards() {
 		for _, gid := range diff {
 			shards = append(shards, counts[gid]...)
 		}
+
+		var countMap PairList
+		for _, gid := range same {
+			var pair Pair
+			pair.Key = gid
+			if _, ok := counts[gid]; !ok {
+				pair.Value = 0
+			} else {
+				pair.Value = len(counts[gid])
+			}
+			countMap = append(countMap, pair)
+		}
+		sort.Sort(countMap)
 		for i, shard := range shards {
-			lastConfig.Shards[shard] = same[i%len(same)]
+			lastConfig.Shards[shard] = countMap[i%len(countMap)].Key
 		}
 	} else { // more groups
 		for _, gid := range diff {
@@ -264,14 +288,37 @@ func (sm *ShardMaster) apply() {
 				if op, ok := msg.Command.(Op); ok {
 					if sm.executed[op.ID] < op.Seq {
 						sm.mu.Lock()
-						sm.configs = append(sm.configs, op.Config)
-						sm.assignShards()
+						oldConfig := sm.lastConfig()
+						newConfig := Config{Num: oldConfig.Num + 1, Shards: oldConfig.Shards, Groups: make(map[int][]string)}
+						for gid, servers := range oldConfig.Groups {
+							newConfig.Groups[gid] = servers
+						}
+						var needBalance bool
+						switch op.Type {
+						case "Join":
+							for gid, servers := range op.Servers {
+								newConfig.Groups[gid] = servers
+							}
+							needBalance = true
+						case "Leave":
+							for _, gid := range op.GIDs {
+								delete(newConfig.Groups, gid)
+							}
+							needBalance = true
+						case "Move":
+							newConfig.Shards[op.Shard] = op.GID
+						}
+						sm.configs = append(sm.configs, newConfig)
+						if needBalance {
+							sm.balance()
+						}
 						sm.executed[op.ID] = op.Seq
 						sm.mu.Unlock()
 						if sm.rf.State() == raft.Leader && !msg.Recover {
-							log.Printf("index of command: %v", msg.CommandIndex)
+							//log.Printf("index of command: %v", msg.CommandIndex)
 							sm.done <- msg.CommandIndex
 						}
+						log.Printf("last config: %v", sm.lastConfig())
 					}
 				}
 			}

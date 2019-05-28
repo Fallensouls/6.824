@@ -743,7 +743,7 @@ func (rf *Raft) apply() {
 				applyMsg = append(applyMsg, apply)
 			}
 			//log.Printf("apply message of server %v: %v", rf.ID, applyMsg)
-			log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
+			//log.Printf("log of server %v: %v", rf.ID, rf.log.Entries)
 			rf.mu.Unlock()
 			if len(applyMsg) != 0 {
 			loop:
@@ -754,10 +754,10 @@ func (rf *Raft) apply() {
 					default:
 						rf.applyCh <- msg
 						rf.lastApplied = uint64(msg.CommandIndex)
-						log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
+						//log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
 					}
 				}
-				log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
+				//log.Printf("apply index of server %v: %v", rf.ID, rf.lastApplied)
 				if rf.needSnapshot() {
 					rf.snapshotting = true
 					rf.SnapshotCh <- struct{}{}
