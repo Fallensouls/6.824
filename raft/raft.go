@@ -74,6 +74,17 @@ type Snapshot struct {
 	Data  []byte
 }
 
+type Event struct {
+	request  interface{}
+	response interface{}
+	err      chan error
+}
+
+type Response struct {
+	from     int
+	response interface{}
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -110,6 +121,10 @@ type Raft struct {
 	snapshotting  bool
 
 	// signals
+	event             chan *Event
+	res               chan Response
+	stateCh           chan State
+	done              chan struct{}
 	SnapshotCh        chan struct{}
 	InstallSnapshotCh chan uint64
 	SnapshotData      chan Snapshot
@@ -138,6 +153,11 @@ func (rf *Raft) State() State {
 	return rf.state
 }
 
+func (rf *Raft) setState(state State) {
+	rf.stateCh <- state
+	<-rf.done
+}
+
 func (rf *Raft) SetMaxSize(maxSize int) {
 	if maxSize < 0 {
 		maxSize = 0
@@ -156,17 +176,18 @@ func (rf *Raft) convertToFollower(term uint64) {
 	rf.state = Follower
 	rf.votedFor = ``
 
-	//logger.Printf("Follower ID:%v\n", rf.me)
-	//logger.Printf("Follower term: %d\n", rf.currentTerm)
+	logger.Printf("Follower ID:%v\n", rf.me)
+	logger.Printf("Follower term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToPreCandidate() {
 	rf.mu.Lock()
 	rf.state = PreCandidate
+	rf.votedFor = rf.ID
 	rf.mu.Unlock()
 
-	//logger.Printf("Pre-candidate ID:%v\n", rf.me)
-	//logger.Printf("Pre-candidate term: %d\n", rf.currentTerm)
+	logger.Printf("Pre-candidate ID:%v\n", rf.me)
+	logger.Printf("Pre-candidate term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToCandidate() {
@@ -177,8 +198,8 @@ func (rf *Raft) convertToCandidate() {
 	rf.votedFor = rf.ID
 
 	rf.mu.Unlock()
-	//logger.Printf("Candidate ID:%v\n", rf.me)
-	//logger.Printf("Candidate term: %d\n", rf.currentTerm)
+	logger.Printf("Candidate ID:%v\n", rf.me)
+	logger.Printf("Candidate term: %d\n", rf.currentTerm)
 }
 
 func (rf *Raft) convertToLeader() {
@@ -201,8 +222,8 @@ func (rf *Raft) convertToLeader() {
 	}
 
 	rf.mu.Unlock()
-	//logger.Printf("Leader ID:%v\n", rf.me)
-	//logger.Printf("Leader term: %d\n", rf.currentTerm)
+	logger.Printf("Leader ID:%v\n", rf.me)
+	logger.Printf("Leader term: %d\n", rf.currentTerm)
 }
 
 /*
@@ -249,6 +270,29 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(rf.log)
 }
 
+func (rf *Raft) handleRequest(req interface{}, res interface{}) {
+	event := &Event{request: req, response: res, err: make(chan error)}
+	rf.event <- event
+
+	select {
+	case <-event.err:
+
+	}
+	log.Printf("response of server %v: %v", rf.ID, res)
+}
+
+func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
+	rf.handleRequest(req, res)
+}
+
+func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesResponse) {
+	rf.handleRequest(req, res)
+}
+
+func (rf *Raft) InstallSnapshot(req *InstallSnapshotRequest, res *InstallSnapshotResponse) {
+	rf.handleRequest(req, res)
+}
+
 /*
 ****************************
 *       Request Vote       *
@@ -256,7 +300,7 @@ func (rf *Raft) readPersist(data []byte) {
  */
 
 //
-// example RequestVote RPC arguments structure.
+// example handleRequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteRequest struct {
@@ -269,7 +313,7 @@ type RequestVoteRequest struct {
 }
 
 //
-// example RequestVote RPC reply structure.
+// example handleRequestVote RPC reply structure.
 // field names must start with capital letters!
 //
 type RequestVoteResponse struct {
@@ -278,19 +322,19 @@ type RequestVoteResponse struct {
 	VoteGranted bool   // true if Candidate can receive vote
 }
 
-func (rf *Raft) NewVoteRequest() *RequestVoteRequest {
+func (rf *Raft) newVoteRequest(preVote bool) *RequestVoteRequest {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	var currentTerm uint64
-	if rf.preVote {
+	if preVote {
 		currentTerm = rf.currentTerm + 1
 	} else {
 		currentTerm = rf.currentTerm
 	}
 
 	return &RequestVoteRequest{
-		rf.preVote,
+		preVote,
 		currentTerm,
 		rf.ID,
 		rf.log.LastIndex(),
@@ -299,9 +343,9 @@ func (rf *Raft) NewVoteRequest() *RequestVoteRequest {
 }
 
 //
-// example RequestVote RPC handler.
+// example handleRequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
+func (rf *Raft) handleRequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -325,8 +369,7 @@ func (rf *Raft) RequestVote(req *RequestVoteRequest, res *RequestVoteResponse) {
 	var upToDate bool
 	if rf.log.LastTerm() < req.LastLogTerm {
 		upToDate = true
-	}
-	if rf.log.LastTerm() == req.LastLogTerm && rf.log.LastIndex() <= req.LastLogIndex {
+	} else if rf.log.LastTerm() == req.LastLogTerm && rf.log.LastIndex() <= req.LastLogIndex {
 		upToDate = true
 	}
 	// if receiver is not a Candidate and upToDate is true, the Candidate will receive a vote.
@@ -382,7 +425,7 @@ type AppendEntriesResponse struct {
 	ConflictTerm uint64
 }
 
-func (rf *Raft) NewAppendEntriesRequest(server int) *AppendEntriesRequest {
+func (rf *Raft) newAppendEntriesRequest(server int) *AppendEntriesRequest {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -428,11 +471,11 @@ func (rf *Raft) NewHeartBeat() *AppendEntriesRequest {
 	}
 }
 
-func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesResponse) {
+func (rf *Raft) handleAppendEntries(req *AppendEntriesRequest, res *AppendEntriesResponse) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//logger.Printf("server %v receives request: %v", rf.ID, req)
+	logger.Printf("server %v receives request: %v", rf.ID, req)
 
 	// return receiver's currentTerm for Candidate to update itself.
 	res.Term = rf.currentTerm
@@ -513,7 +556,7 @@ func (rf *Raft) handleAppendEntriesResponse(server int, res AppendEntriesRespons
 	} else {
 		rf.nextIndex[server] = res.FirstIndex
 	}
-	go rf.updateCommitIndex()
+	rf.updateCommitIndex()
 }
 
 /*
@@ -535,7 +578,7 @@ type InstallSnapshotResponse struct {
 	Term uint64
 }
 
-func (rf *Raft) NewInstallSnapshotRequest() *InstallSnapshotRequest {
+func (rf *Raft) newInstallSnapshotRequest() *InstallSnapshotRequest {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -550,9 +593,9 @@ func (rf *Raft) NewInstallSnapshotRequest() *InstallSnapshotRequest {
 	}
 }
 
-// InstallSnapshot rpc will be send when the leader has already
+// handleInstallSnapshot rpc will be send when the leader has already
 // discarded the next log entry that it needs to send to a follower.
-func (rf *Raft) InstallSnapshot(req *InstallSnapshotRequest, res *InstallSnapshotResponse) {
+func (rf *Raft) handleInstallSnapshot(req *InstallSnapshotRequest, res *InstallSnapshotResponse) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -601,7 +644,7 @@ func (rf *Raft) handleInstallSnapshotResponse(server int, res InstallSnapshotRes
 }
 
 //
-// example code to send a RequestVote RPC to a server.
+// example code to send a handleRequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
 // fills in *reply with RPC reply, so caller should
@@ -628,7 +671,7 @@ func (rf *Raft) handleInstallSnapshotResponse(server int, res InstallSnapshotRes
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-//
+
 func (rf *Raft) sendRequestVote(server int, request *RequestVoteRequest, response *RequestVoteResponse) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", request, response)
 	return ok
@@ -650,8 +693,8 @@ func (rf *Raft) sendInstallSnapshot(server int, request *InstallSnapshotRequest,
 *****************************
  */
 
-func (rf *Raft) electLeader(voteCh chan struct{}) {
-	request := rf.NewVoteRequest()
+func (rf *Raft) electLeader(preVote bool, voteCh chan struct{}) {
+	request := rf.newVoteRequest(preVote)
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
@@ -670,13 +713,15 @@ func (rf *Raft) broadcast() {
 			go func(server int) {
 				if rf.nextIndex[server] <= rf.log.LastIncludedIndex {
 					var response InstallSnapshotResponse
-					if rf.sendInstallSnapshot(server, rf.NewInstallSnapshotRequest(), &response) {
-						rf.handleInstallSnapshotResponse(server, response)
+					if rf.sendInstallSnapshot(server, rf.newInstallSnapshotRequest(), &response) {
+						rf.res <- Response{from: server, response: response}
+						//rf.handleInstallSnapshotResponse(server, response)
 					}
 				} else {
 					var response AppendEntriesResponse
-					if rf.sendAppendEntries(server, rf.NewAppendEntriesRequest(server), &response) {
-						rf.handleAppendEntriesResponse(server, response)
+					if rf.sendAppendEntries(server, rf.newAppendEntriesRequest(server), &response) {
+						rf.res <- Response{from: server, response: response}
+						//rf.handleAppendEntriesResponse(server, response)
 					}
 				}
 			}(i)
@@ -713,7 +758,7 @@ func (rf *Raft) heartBeat() error {
 }
 
 func (rf *Raft) updateCommitIndex() {
-	rf.mu.Lock()
+	//rf.mu.Lock()
 
 	sorted := make([]uint64, len(rf.matchIndex))
 	copy(sorted, rf.matchIndex)
@@ -728,7 +773,7 @@ func (rf *Raft) updateCommitIndex() {
 	}
 	//logger.Printf("commit index of Leader: %v", rf.commitIndex)
 	//logger.Printf("entries of Leader: %v", rf.log.Entries)
-	rf.mu.Unlock()
+	//rf.mu.Unlock()
 }
 
 func (rf *Raft) handleLog() {
@@ -804,11 +849,13 @@ func (rf *Raft) followerLoop() {
 		select {
 		case <-electionTimer.C:
 			electionTimer.Stop()
+			var state State
 			if rf.preVote {
-				rf.convertToPreCandidate()
-				return
+				state = PreCandidate
+			} else {
+				state = Candidate
 			}
-			rf.convertToCandidate()
+			rf.setState(state)
 			return
 		case <-rf.resetCh:
 			if !electionTimer.Stop() {
@@ -823,7 +870,7 @@ func (rf *Raft) preCandidateLoop() {
 	votes := 1
 	voteCh := make(chan struct{}, len(rf.peers)-1)
 	timeout := time.NewTimer(5 * rf.heartBeatInterval)
-	rf.electLeader(voteCh)
+	rf.electLeader(true, voteCh)
 
 Loop:
 	for {
@@ -831,14 +878,12 @@ Loop:
 		case <-voteCh:
 			votes++
 			if votes > len(rf.peers)/2 {
-				rf.convertToCandidate()
+				rf.setState(Candidate)
 				break Loop
 			}
 		case <-timeout.C:
 			timeout.Stop()
-			rf.mu.Lock()
-			rf.convertToFollower(rf.currentTerm)
-			rf.mu.Unlock()
+			rf.setState(Follower)
 			break Loop
 		case <-rf.resetCh:
 			break Loop
@@ -849,13 +894,13 @@ Loop:
 // CandidateLoop is loop of Candidate.
 // Candidate will have the following action:
 // 1) If votes received from majority of servers: become Leader.
-// 2) If AppendEntries RPC received from new Leader: convert to Follower.
+// 2) If handleAppendEntries RPC received from new Leader: convert to Follower.
 // 3) If election timeout elapses: start new election.
 func (rf *Raft) candidateLoop() {
 	votes := 1
 	voteCh := make(chan struct{}, len(rf.peers)-1)
 	electionTicker := time.NewTicker(rf.electionTimeout)
-	rf.electLeader(voteCh)
+	rf.electLeader(false, voteCh)
 
 Loop:
 	for {
@@ -863,11 +908,11 @@ Loop:
 		case <-voteCh:
 			votes++
 			if votes > len(rf.peers)/2 {
-				rf.convertToLeader()
+				rf.setState(Leader)
 				break Loop
 			}
 		case <-electionTicker.C:
-			rf.convertToCandidate()
+			rf.setState(Candidate)
 			break Loop
 		case <-rf.resetCh:
 			break Loop
@@ -891,6 +936,62 @@ func (rf *Raft) leaderLoop() {
 	}
 }
 
+func (rf *Raft) handleEvent() {
+	for {
+		select {
+		case e := <-rf.event:
+			var err error
+			switch req := e.request.(type) {
+			case *RequestVoteRequest:
+				rf.handleRequestVote(req, e.response.(*RequestVoteResponse))
+			case *AppendEntriesRequest:
+				rf.handleAppendEntries(req, e.response.(*AppendEntriesResponse))
+			case *InstallSnapshotRequest:
+				rf.handleInstallSnapshot(req, e.response.(*InstallSnapshotResponse))
+			default:
+				rf.mu.Lock()
+				index := rf.log.LastIndex() + 1
+				term := rf.currentTerm
+				isLeader := rf.state == Leader
+
+				if isLeader {
+					rf.log.AddEntry(rf.currentTerm, e.request)
+					rf.nextIndex[rf.me] = index + 1
+					rf.matchIndex[rf.me] = index
+					rf.persist()
+				}
+				rf.mu.Unlock()
+				res := e.response.(*CommandResponse)
+				res.index = int(index)
+				res.term = int(term)
+				res.isLeader = isLeader
+			}
+			e.err <- err
+		case r := <-rf.res:
+			switch res := r.response.(type) {
+			case AppendEntriesResponse:
+				rf.handleAppendEntriesResponse(r.from, res)
+			case InstallSnapshotResponse:
+				rf.handleInstallSnapshotResponse(r.from, res)
+			}
+		case state := <-rf.stateCh:
+			switch state {
+			case Follower:
+				rf.mu.Lock()
+				rf.convertToFollower(rf.currentTerm)
+				rf.mu.Unlock()
+			case PreCandidate:
+				rf.convertToPreCandidate()
+			case Candidate:
+				rf.convertToCandidate()
+			case Leader:
+				rf.convertToLeader()
+			}
+			rf.done <- struct{}{}
+		}
+	}
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -905,21 +1006,26 @@ func (rf *Raft) leaderLoop() {
 // term. the third return value is true if this server believes it is
 // the Leader.
 //
+
+type CommandResponse struct {
+	index    int
+	term     int
+	isLeader bool
+}
+
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
-	rf.mu.Lock()
-	index := rf.log.LastIndex() + 1
-	term := rf.currentTerm
-	isLeader := rf.state == Leader
-
-	if isLeader {
-		rf.log.AddEntry(rf.currentTerm, command)
-		rf.nextIndex[rf.me] = index + 1
-		rf.matchIndex[rf.me] = index
-		rf.persist()
+	var res CommandResponse
+	event := &Event{request: command, response: &res, err: make(chan error)}
+	rf.event <- event
+	select {
+	case <-event.err:
+		return res.index, res.term, res.isLeader
 	}
-	rf.mu.Unlock()
-	return int(index), int(term), isLeader
+	//rf.mu.Lock()
+
+	//rf.mu.Unlock()
+	//return int(index), int(term), isLeader
 }
 
 func (rf *Raft) Read() error {
@@ -980,6 +1086,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.ID = RandomID(8)
 	rf.state = Follower
 	rf.log = NewLog()
+	rf.event = make(chan *Event)
+	rf.res = make(chan Response)
+	rf.stateCh = make(chan State)
+	rf.done = make(chan struct{})
 	rf.resetCh = make(chan struct{})
 	rf.SnapshotCh = make(chan struct{})
 	rf.InstallSnapshotCh = make(chan uint64)
@@ -988,6 +1098,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	rf.electionTimeout = time.Millisecond * time.Duration(400+rand.Intn(200))
+	//log.Printf("timeout of server %v: %v", rf.ID, rf.electionTimeout)
 	rf.heartBeatInterval = 40 * time.Millisecond
 	rf.preVote = true
 
@@ -1013,5 +1124,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.recover = rf.log.LastIndex()
 
 	go rf.handleLog()
+	go rf.handleEvent()
 	return rf
 }
