@@ -278,19 +278,19 @@ type RequestVoteResponse struct {
 	VoteGranted bool   // true if Candidate can receive vote
 }
 
-func (rf *Raft) NewVoteRequest() *RequestVoteRequest {
+func (rf *Raft) newVoteRequest(preVote bool) *RequestVoteRequest {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	var currentTerm uint64
-	if rf.preVote {
+	if preVote {
 		currentTerm = rf.currentTerm + 1
 	} else {
 		currentTerm = rf.currentTerm
 	}
 
 	return &RequestVoteRequest{
-		rf.preVote,
+		preVote,
 		currentTerm,
 		rf.ID,
 		rf.log.LastIndex(),
@@ -382,7 +382,7 @@ type AppendEntriesResponse struct {
 	ConflictTerm uint64
 }
 
-func (rf *Raft) NewAppendEntriesRequest(server int) *AppendEntriesRequest {
+func (rf *Raft) newAppendEntriesRequest(server int) *AppendEntriesRequest {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -535,7 +535,7 @@ type InstallSnapshotResponse struct {
 	Term uint64
 }
 
-func (rf *Raft) NewInstallSnapshotRequest() *InstallSnapshotRequest {
+func (rf *Raft) newInstallSnapshotRequest() *InstallSnapshotRequest {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -650,8 +650,8 @@ func (rf *Raft) sendInstallSnapshot(server int, request *InstallSnapshotRequest,
 *****************************
  */
 
-func (rf *Raft) electLeader(voteCh chan struct{}) {
-	request := rf.NewVoteRequest()
+func (rf *Raft) electLeader(preVote bool, voteCh chan struct{}) {
+	request := rf.newVoteRequest(preVote)
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
@@ -670,12 +670,12 @@ func (rf *Raft) broadcast() {
 			go func(server int) {
 				if rf.nextIndex[server] <= rf.log.LastIncludedIndex {
 					var response InstallSnapshotResponse
-					if rf.sendInstallSnapshot(server, rf.NewInstallSnapshotRequest(), &response) {
+					if rf.sendInstallSnapshot(server, rf.newInstallSnapshotRequest(), &response) {
 						rf.handleInstallSnapshotResponse(server, response)
 					}
 				} else {
 					var response AppendEntriesResponse
-					if rf.sendAppendEntries(server, rf.NewAppendEntriesRequest(server), &response) {
+					if rf.sendAppendEntries(server, rf.newAppendEntriesRequest(server), &response) {
 						rf.handleAppendEntriesResponse(server, response)
 					}
 				}
@@ -823,7 +823,7 @@ func (rf *Raft) preCandidateLoop() {
 	votes := 1
 	voteCh := make(chan struct{}, len(rf.peers)-1)
 	timeout := time.NewTimer(5 * rf.heartBeatInterval)
-	rf.electLeader(voteCh)
+	rf.electLeader(true, voteCh)
 
 Loop:
 	for {
@@ -855,7 +855,7 @@ func (rf *Raft) candidateLoop() {
 	votes := 1
 	voteCh := make(chan struct{}, len(rf.peers)-1)
 	electionTicker := time.NewTicker(rf.electionTimeout)
-	rf.electLeader(voteCh)
+	rf.electLeader(false, voteCh)
 
 Loop:
 	for {
