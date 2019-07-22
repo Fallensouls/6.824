@@ -61,6 +61,13 @@ const (
 	PreCandidate
 )
 
+type CommandType uint8
+
+const (
+	Read CommandType = iota
+	Write
+)
+
 const HeartBeatInterval = 40 * time.Millisecond // 40mS
 
 var (
@@ -77,19 +84,40 @@ type Snapshot struct {
 type Event struct {
 	request  interface{}
 	response interface{}
-	err      chan error
+	done     chan struct{}
+}
+
+type Transition struct {
+	State
+	done chan struct{}
+}
+
+type Request struct {
+	to      int
+	content interface{}
+}
+
+type Message struct {
+	requests []Request
+	created  chan struct{}
 }
 
 type Response struct {
-	from     int
-	response interface{}
+	from    int
+	content interface{}
+}
+
+type Command struct {
+	CommandType
+	content  interface{}
+	response chan interface{}
 }
 
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -116,15 +144,16 @@ type Raft struct {
 	nextIndex  []uint64
 	matchIndex []uint64
 
+	// records
 	recover       uint64    // last applied index before the server crashes
 	lastHeartBeat time.Time // timestamp of last heartbeat
-	snapshotting  bool
 
 	// signals
+	cmd               chan Command
 	event             chan *Event
+	msg               chan *Message
 	res               chan Response
-	stateCh           chan State
-	done              chan struct{}
+	trans             chan Transition
 	SnapshotCh        chan struct{}
 	InstallSnapshotCh chan uint64
 	SnapshotData      chan Snapshot
@@ -153,9 +182,9 @@ func (rf *Raft) State() State {
 	return rf.state
 }
 
-func (rf *Raft) setState(state State) {
-	rf.stateCh <- state
-	<-rf.done
+func (rf *Raft) setState(trans Transition) {
+	rf.trans <- trans
+	<-trans.done
 }
 
 func (rf *Raft) SetMaxSize(maxSize int) {
@@ -176,7 +205,7 @@ func (rf *Raft) convertToFollower(term uint64) {
 	rf.state = Follower
 	rf.votedFor = ``
 
-	logger.Printf("Follower ID:%v\n", rf.me)
+	logger.Printf("Follower ID:%v\n", rf.ID)
 	logger.Printf("Follower term: %d\n", rf.currentTerm)
 }
 
@@ -186,7 +215,7 @@ func (rf *Raft) convertToPreCandidate() {
 	rf.votedFor = rf.ID
 	rf.mu.Unlock()
 
-	logger.Printf("Pre-candidate ID:%v\n", rf.me)
+	logger.Printf("Pre-candidate ID:%v\n", rf.ID)
 	logger.Printf("Pre-candidate term: %d\n", rf.currentTerm)
 }
 
@@ -198,7 +227,7 @@ func (rf *Raft) convertToCandidate() {
 	rf.votedFor = rf.ID
 
 	rf.mu.Unlock()
-	logger.Printf("Candidate ID:%v\n", rf.me)
+	logger.Printf("Candidate ID:%v\n", rf.ID)
 	logger.Printf("Candidate term: %d\n", rf.currentTerm)
 }
 
@@ -222,7 +251,7 @@ func (rf *Raft) convertToLeader() {
 	}
 
 	rf.mu.Unlock()
-	logger.Printf("Leader ID:%v\n", rf.me)
+	logger.Printf("Leader ID:%v\n", rf.ID)
 	logger.Printf("Leader term: %d\n", rf.currentTerm)
 }
 
@@ -271,13 +300,10 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 func (rf *Raft) handleRequest(req interface{}, res interface{}) {
-	event := &Event{request: req, response: res, err: make(chan error)}
+	event := &Event{request: req, response: res, done: make(chan struct{})}
 	rf.event <- event
+	<-event.done
 
-	select {
-	case <-event.err:
-
-	}
 	log.Printf("response of server %v: %v", rf.ID, res)
 }
 
@@ -655,11 +681,11 @@ func (rf *Raft) handleInstallSnapshotResponse(server int, res InstallSnapshotRes
 //
 // The labrpc package simulates a lossy network, in which servers
 // may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
+// Call() sends a content and waits for a reply. If a reply arrives
 // within a timeout interval, Call() returns true; otherwise
 // Call() returns false. Thus Call() may not return for a while.
 // A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
+// can't be reached, a lost content, or a lost reply.
 //
 // Call() is guaranteed to return (perhaps after a delay) *except* if the
 // handler function on the server side does not return.  Thus there
@@ -693,13 +719,17 @@ func (rf *Raft) sendInstallSnapshot(server int, request *InstallSnapshotRequest,
 *****************************
  */
 
-func (rf *Raft) electLeader(preVote bool, voteCh chan struct{}) {
-	request := rf.newVoteRequest(preVote)
+func (rf *Raft) electLeader(voteCh chan struct{}) {
+	msg := &Message{created: make(chan struct{})}
+	rf.msg <- msg
+	<-msg.created
+	req := msg.requests[0].content.(*RequestVoteRequest)
+
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
 				var response RequestVoteResponse
-				if rf.sendRequestVote(server, request, &response) {
+				if rf.sendRequestVote(server, req, &response) {
 					rf.handleVoteResponse(response, voteCh)
 				}
 			}(i)
@@ -707,25 +737,22 @@ func (rf *Raft) electLeader(preVote bool, voteCh chan struct{}) {
 	}
 }
 
-func (rf *Raft) broadcast() {
-	for i := range rf.peers {
-		if i != rf.me {
-			go func(server int) {
-				if rf.nextIndex[server] <= rf.log.LastIncludedIndex {
-					var response InstallSnapshotResponse
-					if rf.sendInstallSnapshot(server, rf.newInstallSnapshotRequest(), &response) {
-						rf.res <- Response{from: server, response: response}
-						//rf.handleInstallSnapshotResponse(server, response)
-					}
-				} else {
-					var response AppendEntriesResponse
-					if rf.sendAppendEntries(server, rf.newAppendEntriesRequest(server), &response) {
-						rf.res <- Response{from: server, response: response}
-						//rf.handleAppendEntriesResponse(server, response)
-					}
+func (rf *Raft) broadcast(requests []Request) {
+	for _, req := range requests {
+		go func(r Request) {
+			switch content := r.content.(type) {
+			case *AppendEntriesRequest:
+				var res AppendEntriesResponse
+				if rf.sendAppendEntries(r.to, content, &res) {
+					rf.res <- Response{from: r.to, content: res}
 				}
-			}(i)
-		}
+			case *InstallSnapshotRequest:
+				var res InstallSnapshotResponse
+				if rf.sendInstallSnapshot(r.to, content, &res) {
+					rf.res <- Response{from: r.to, content: res}
+				}
+			}
+		}(req)
 	}
 }
 
@@ -774,6 +801,186 @@ func (rf *Raft) updateCommitIndex() {
 	//logger.Printf("commit index of Leader: %v", rf.commitIndex)
 	//logger.Printf("entries of Leader: %v", rf.log.Entries)
 	//rf.mu.Unlock()
+}
+
+func (rf *Raft) needSnapshot() bool {
+	return rf.persister.RaftStateSize() >= int(rf.log.MaxSize) && rf.log.MaxSize != 0
+}
+
+func (rf *Raft) ReadSnapshot() []byte {
+	return rf.persister.ReadSnapshot()
+}
+
+/*
+*****************************
+*        State Loop         *
+*****************************
+ */
+
+// FollowerLoop is loop of Follower.
+// Since Follower can only convert to Candidate, the Follower loop just wait for a election timeout,
+// or reset its election timer.
+func (rf *Raft) followerLoop() {
+	electionTimer := time.NewTimer(rf.electionTimeout)
+	for {
+		select {
+		case <-electionTimer.C:
+			electionTimer.Stop()
+			var state State
+			if rf.preVote {
+				state = PreCandidate
+			} else {
+				state = Candidate
+			}
+			rf.setState(Transition{state, make(chan struct{})})
+			return
+		case <-rf.resetCh:
+			if !electionTimer.Stop() {
+				<-electionTimer.C
+			}
+			electionTimer.Reset(rf.electionTimeout)
+		}
+	}
+}
+
+func (rf *Raft) preCandidateLoop() {
+	votes := 1
+	voteCh := make(chan struct{}, len(rf.peers)-1)
+	timeout := time.NewTimer(5 * rf.heartBeatInterval)
+	rf.electLeader(voteCh)
+
+Loop:
+	for {
+		select {
+		case <-voteCh:
+			votes++
+			if votes > len(rf.peers)/2 {
+				rf.setState(Transition{Candidate, make(chan struct{})})
+				break Loop
+			}
+		case <-timeout.C:
+			timeout.Stop()
+			rf.setState(Transition{Follower, make(chan struct{})})
+			break Loop
+		case <-rf.resetCh:
+			break Loop
+		}
+	}
+}
+
+// CandidateLoop is loop of Candidate.
+// Candidate will have the following action:
+// 1) If votes received from majority of servers: become Leader.
+// 2) If handleAppendEntries RPC received from new Leader: convert to Follower.
+// 3) If election timeout elapses: start new election.
+func (rf *Raft) candidateLoop() {
+	votes := 1
+	voteCh := make(chan struct{}, len(rf.peers)-1)
+	electionTicker := time.NewTicker(rf.electionTimeout)
+	rf.electLeader(voteCh)
+
+Loop:
+	for {
+		select {
+		case <-voteCh:
+			votes++
+			if votes > len(rf.peers)/2 {
+				rf.setState(Transition{Leader, make(chan struct{})})
+				break Loop
+			}
+		case <-electionTicker.C:
+			rf.setState(Transition{Candidate, make(chan struct{})})
+			break Loop
+		case <-rf.resetCh:
+			break Loop
+		}
+	}
+	electionTicker.Stop()
+}
+
+// LeaderLoop is loop of Leader.
+// Leader will convert to Follower if it receives a content or response containing a higher term.
+func (rf *Raft) leaderLoop() {
+	heartBeatTicker := time.NewTicker(rf.heartBeatInterval)
+	for {
+		select {
+		case <-heartBeatTicker.C:
+			msg := &Message{created: make(chan struct{})}
+			rf.msg <- msg
+			<-msg.created
+			rf.broadcast(msg.requests)
+		case <-rf.resetCh:
+			heartBeatTicker.Stop()
+			return
+		}
+	}
+}
+
+func (rf *Raft) handleEvent() {
+	for {
+		select {
+		case e := <-rf.event:
+			switch req := e.request.(type) {
+			case *RequestVoteRequest:
+				rf.handleRequestVote(req, e.response.(*RequestVoteResponse))
+			case *AppendEntriesRequest:
+				rf.handleAppendEntries(req, e.response.(*AppendEntriesResponse))
+			case *InstallSnapshotRequest:
+				rf.handleInstallSnapshot(req, e.response.(*InstallSnapshotResponse))
+			}
+			e.done <- struct{}{}
+		case cmd := <-rf.cmd:
+			switch cmd.CommandType {
+			case Write:
+				res := rf.write(cmd.content)
+				cmd.response <- res
+			case Read:
+				err := rf.read()
+				cmd.response <- err
+			}
+		case r := <-rf.res:
+			switch res := r.content.(type) {
+			case AppendEntriesResponse:
+				rf.handleAppendEntriesResponse(r.from, res)
+			case InstallSnapshotResponse:
+				rf.handleInstallSnapshotResponse(r.from, res)
+			}
+		case msg := <-rf.msg:
+			switch rf.state {
+			case Leader:
+				for i := range rf.peers {
+					if i != rf.me {
+						if rf.nextIndex[i] <= rf.log.LastIncludedIndex {
+							msg.requests = append(msg.requests, Request{to: i, content: rf.newInstallSnapshotRequest()})
+						} else {
+							msg.requests = append(msg.requests, Request{to: i, content: rf.newAppendEntriesRequest(i)})
+						}
+					}
+				}
+			case PreCandidate:
+				msg.requests = append(msg.requests, Request{content: rf.newVoteRequest(true)})
+			case Candidate:
+				msg.requests = append(msg.requests, Request{content: rf.newVoteRequest(false)})
+			case Follower:
+				log.Panic("follower should not send requests to other servers")
+			}
+			msg.created <- struct{}{}
+		case trans := <-rf.trans:
+			switch trans.State {
+			case Follower:
+				rf.mu.Lock()
+				rf.convertToFollower(rf.currentTerm)
+				rf.mu.Unlock()
+			case PreCandidate:
+				rf.convertToPreCandidate()
+			case Candidate:
+				rf.convertToCandidate()
+			case Leader:
+				rf.convertToLeader()
+			}
+			trans.done <- struct{}{}
+		}
+	}
 }
 
 func (rf *Raft) handleLog() {
@@ -826,172 +1033,6 @@ func (rf *Raft) handleLog() {
 	}
 }
 
-func (rf *Raft) needSnapshot() bool {
-	return rf.persister.RaftStateSize() >= int(rf.log.MaxSize) && rf.log.MaxSize != 0
-}
-
-func (rf *Raft) ReadSnapshot() []byte {
-	return rf.persister.ReadSnapshot()
-}
-
-/*
-*****************************
-*        State Loop         *
-*****************************
- */
-
-// FollowerLoop is loop of Follower.
-// Since Follower can only convert to Candidate, the Follower loop just wait for a election timeout,
-// or reset its election timer.
-func (rf *Raft) followerLoop() {
-	electionTimer := time.NewTimer(rf.electionTimeout)
-	for {
-		select {
-		case <-electionTimer.C:
-			electionTimer.Stop()
-			var state State
-			if rf.preVote {
-				state = PreCandidate
-			} else {
-				state = Candidate
-			}
-			rf.setState(state)
-			return
-		case <-rf.resetCh:
-			if !electionTimer.Stop() {
-				<-electionTimer.C
-			}
-			electionTimer.Reset(rf.electionTimeout)
-		}
-	}
-}
-
-func (rf *Raft) preCandidateLoop() {
-	votes := 1
-	voteCh := make(chan struct{}, len(rf.peers)-1)
-	timeout := time.NewTimer(5 * rf.heartBeatInterval)
-	rf.electLeader(true, voteCh)
-
-Loop:
-	for {
-		select {
-		case <-voteCh:
-			votes++
-			if votes > len(rf.peers)/2 {
-				rf.setState(Candidate)
-				break Loop
-			}
-		case <-timeout.C:
-			timeout.Stop()
-			rf.setState(Follower)
-			break Loop
-		case <-rf.resetCh:
-			break Loop
-		}
-	}
-}
-
-// CandidateLoop is loop of Candidate.
-// Candidate will have the following action:
-// 1) If votes received from majority of servers: become Leader.
-// 2) If handleAppendEntries RPC received from new Leader: convert to Follower.
-// 3) If election timeout elapses: start new election.
-func (rf *Raft) candidateLoop() {
-	votes := 1
-	voteCh := make(chan struct{}, len(rf.peers)-1)
-	electionTicker := time.NewTicker(rf.electionTimeout)
-	rf.electLeader(false, voteCh)
-
-Loop:
-	for {
-		select {
-		case <-voteCh:
-			votes++
-			if votes > len(rf.peers)/2 {
-				rf.setState(Leader)
-				break Loop
-			}
-		case <-electionTicker.C:
-			rf.setState(Candidate)
-			break Loop
-		case <-rf.resetCh:
-			break Loop
-		}
-	}
-	electionTicker.Stop()
-}
-
-// LeaderLoop is loop of Leader.
-// Leader will convert to Follower if it receives a request or response containing a higher term.
-func (rf *Raft) leaderLoop() {
-	heartBeatTicker := time.NewTicker(rf.heartBeatInterval)
-	for {
-		select {
-		case <-heartBeatTicker.C:
-			rf.broadcast()
-		case <-rf.resetCh:
-			heartBeatTicker.Stop()
-			return
-		}
-	}
-}
-
-func (rf *Raft) handleEvent() {
-	for {
-		select {
-		case e := <-rf.event:
-			var err error
-			switch req := e.request.(type) {
-			case *RequestVoteRequest:
-				rf.handleRequestVote(req, e.response.(*RequestVoteResponse))
-			case *AppendEntriesRequest:
-				rf.handleAppendEntries(req, e.response.(*AppendEntriesResponse))
-			case *InstallSnapshotRequest:
-				rf.handleInstallSnapshot(req, e.response.(*InstallSnapshotResponse))
-			default:
-				rf.mu.Lock()
-				index := rf.log.LastIndex() + 1
-				term := rf.currentTerm
-				isLeader := rf.state == Leader
-
-				if isLeader {
-					rf.log.AddEntry(rf.currentTerm, e.request)
-					rf.nextIndex[rf.me] = index + 1
-					rf.matchIndex[rf.me] = index
-					rf.persist()
-				}
-				rf.mu.Unlock()
-				res := e.response.(*CommandResponse)
-				res.index = int(index)
-				res.term = int(term)
-				res.isLeader = isLeader
-			}
-			e.err <- err
-		case r := <-rf.res:
-			switch res := r.response.(type) {
-			case AppendEntriesResponse:
-				rf.handleAppendEntriesResponse(r.from, res)
-			case InstallSnapshotResponse:
-				rf.handleInstallSnapshotResponse(r.from, res)
-			}
-		case state := <-rf.stateCh:
-			switch state {
-			case Follower:
-				rf.mu.Lock()
-				rf.convertToFollower(rf.currentTerm)
-				rf.mu.Unlock()
-			case PreCandidate:
-				rf.convertToPreCandidate()
-			case Candidate:
-				rf.convertToCandidate()
-			case Leader:
-				rf.convertToLeader()
-			}
-			rf.done <- struct{}{}
-		}
-	}
-}
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -1006,7 +1047,6 @@ func (rf *Raft) handleEvent() {
 // term. the third return value is true if this server believes it is
 // the Leader.
 //
-
 type CommandResponse struct {
 	index    int
 	term     int
@@ -1015,20 +1055,40 @@ type CommandResponse struct {
 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
-	var res CommandResponse
-	event := &Event{request: command, response: &res, err: make(chan error)}
-	rf.event <- event
-	select {
-	case <-event.err:
-		return res.index, res.term, res.isLeader
-	}
-	//rf.mu.Lock()
+	cmd := Command{Write, command, make(chan interface{})}
+	rf.cmd <- cmd
+	response := <-cmd.response
+	res := response.(CommandResponse)
+	return res.index, res.term, res.isLeader
+}
 
-	//rf.mu.Unlock()
-	//return int(index), int(term), isLeader
+func (rf *Raft) write(command interface{}) CommandResponse {
+	rf.mu.Lock()
+	index := rf.log.LastIndex() + 1
+	term := rf.currentTerm
+	isLeader := rf.state == Leader
+
+	if isLeader {
+		rf.log.AddEntry(rf.currentTerm, command)
+		rf.nextIndex[rf.me] = index + 1
+		rf.matchIndex[rf.me] = index
+		rf.persist()
+	}
+	rf.mu.Unlock()
+	return CommandResponse{index: int(index), term: int(term), isLeader: isLeader}
 }
 
 func (rf *Raft) Read() error {
+	cmd := Command{Read, nil, make(chan interface{})}
+	rf.cmd <- cmd
+	err := <-cmd.response
+	if err != nil {
+		return err.(error)
+	}
+	return nil
+}
+
+func (rf *Raft) read() error {
 	readIndex := rf.commitIndex
 	if readIndex < rf.recover {
 		readIndex = rf.recover
@@ -1086,10 +1146,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.ID = RandomID(8)
 	rf.state = Follower
 	rf.log = NewLog()
+	rf.cmd = make(chan Command)
 	rf.event = make(chan *Event)
+	rf.msg = make(chan *Message)
 	rf.res = make(chan Response)
-	rf.stateCh = make(chan State)
-	rf.done = make(chan struct{})
+	rf.trans = make(chan Transition)
 	rf.resetCh = make(chan struct{})
 	rf.SnapshotCh = make(chan struct{})
 	rf.InstallSnapshotCh = make(chan uint64)
