@@ -6,6 +6,7 @@ const (
 	ErrExecuted    = "ErrExecuted"
 	ErrTimeout     = "ErrTimeout"
 	ErrPartitioned = "ErrPartitioned"
+	ErrShutdown    = "ErrShutdown"
 )
 
 type Err string

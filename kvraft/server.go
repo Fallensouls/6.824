@@ -59,20 +59,20 @@ func (kv *KVServer) Get(req *GetRequest, res *GetResponse) {
 	kv.mu.RLock()
 	defer kv.mu.RUnlock()
 
-	if err == raft.ErrPartitioned {
+	switch err {
+	case raft.ErrPartitioned:
 		res.WrongLeader = false
 		res.Err = ErrPartitioned
 		return
-	}
-
-	if err == raft.ErrNotLeader {
+	case raft.ErrNotLeader:
 		res.WrongLeader = true
 		return
-	}
-
-	if err == raft.ErrTimeout {
+	case raft.ErrTimeout:
 		res.WrongLeader = false
 		res.Err = ErrTimeout
+		return
+	case raft.ErrShutdown:
+		res.WrongLeader = true
 		return
 	}
 
