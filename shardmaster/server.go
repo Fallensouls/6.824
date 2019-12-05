@@ -18,7 +18,6 @@ type ShardMaster struct {
 
 	// Your data here.
 	executed map[string]uint64
-	done     chan int
 	configs  []Config // indexed by config num
 }
 
@@ -33,118 +32,53 @@ type Op struct {
 	GIDs    []int
 	Shard   int
 	GID     int
+	done    chan struct{}
 }
 
 func (sm *ShardMaster) lastConfig() *Config {
 	return &sm.configs[len(sm.configs)-1]
 }
 
-func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
-	// Your code here.
-	if sm.executed[args.ID] > args.Seq {
+func (sm *ShardMaster) start(id string, seq uint64, args interface{}) (wrongLeader bool) {
+	if sm.executed[id] > seq {
 		return
 	}
-	if sm.rf.State() != raft.Leader {
-		reply.WrongLeader = true
+	var op Op
+	switch args := args.(type) {
+	case *JoinArgs:
+		op = Op{ID: args.ID, Seq: args.Seq, Type: "Join", Servers: args.Servers, done: make(chan struct{})}
+	case *LeaveArgs:
+		op = Op{ID: args.ID, Seq: args.Seq, Type: "Leave", GIDs: args.GIDs, done: make(chan struct{})}
+	case *MoveArgs:
+		op = Op{ID: args.ID, Seq: args.Seq, Type: "Move", Shard: args.Shard, GID: args.GID, done: make(chan struct{})}
+	default:
 		return
 	}
-	//sm.mu.Lock()
-	//newConfig := Config{Groups: make(map[int][]string)}
-	//oldConfig := sm.lastConfig()
-	//sm.mu.Unlock()
-	//for key, value := range oldConfig.Groups {
-	//	newConfig.Groups[key] = value
-	//}
-	//for key, value := range args.Servers {
-	//	newConfig.Groups[key] = value
-	//}
-	//newConfig.Num = oldConfig.Num + 1
-	//newConfig.Shards = oldConfig.Shards
-	index, _, _ := sm.rf.Start(Op{ID: args.ID, Seq: args.Seq, Type: "Join", Servers: args.Servers})
+	_, _, isLeader := sm.rf.Start(op)
+	if !isLeader {
+		return true
+	}
 	for {
 		select {
-		case doneIndex := <-sm.done:
-			//log.Println(doneIndex)
-			if doneIndex == index {
-				return
-			}
-			//case <-timeout.C:
-			//	timeout.Stop()
-			//	res.Err = ErrTimeout
-			//	return
+		case <-op.done:
+			return
 		}
 	}
+}
+
+func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
+	// Your code here.
+	reply.WrongLeader = sm.start(args.ID, args.Seq, args)
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
-	if sm.executed[args.ID] > args.Seq {
-		return
-	}
-	if sm.rf.State() != raft.Leader {
-		reply.WrongLeader = true
-		return
-	}
-	//sm.mu.Lock()
-	//newConfig := Config{Groups: make(map[int][]string)}
-	//oldConfig := sm.lastConfig()
-	//sm.mu.Unlock()
-	//for key, value := range oldConfig.Groups {
-	//	newConfig.Groups[key] = value
-	//}
-	//for _, gid := range args.GIDs {
-	//	delete(newConfig.Groups, gid)
-	//}
-	//newConfig.Num = oldConfig.Num + 1
-	//newConfig.Shards = oldConfig.Shards
-	index, _, _ := sm.rf.Start(Op{ID: args.ID, Seq: args.Seq, Type: "Leave", GIDs: args.GIDs})
-	//timeout := time.NewTimer(10 * raft.HeartBeatInterval)
-	for {
-		select {
-		case doneIndex := <-sm.done:
-			if doneIndex == index {
-				return
-			}
-			//case <-timeout.C:
-			//	timeout.Stop()
-			//	res.Err = ErrTimeout
-			//	return
-		}
-	}
+	reply.WrongLeader = sm.start(args.ID, args.Seq, args)
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
-	if sm.executed[args.ID] > args.Seq {
-		return
-	}
-	if sm.rf.State() != raft.Leader {
-		reply.WrongLeader = true
-		return
-	}
-	//sm.mu.Lock()
-	//newConfig := Config{Groups: make(map[int][]string)}
-	//oldConfig := sm.lastConfig()
-	//sm.mu.Unlock()
-	//for key, value := range oldConfig.Groups {
-	//	newConfig.Groups[key] = value
-	//}
-	//newConfig.Num = oldConfig.Num + 1
-	//newConfig.Shards = oldConfig.Shards
-	//newConfig.Shards[args.Shard] = args.GID
-	index, _, _ := sm.rf.Start(Op{ID: args.ID, Seq: args.Seq, Type: "Move", Shard: args.Shard, GID: args.GID})
-	for {
-		select {
-		case doneIndex := <-sm.done:
-			if doneIndex == index {
-				return
-			}
-			//case <-timeout.C:
-			//	timeout.Stop()
-			//	res.Err = ErrTimeout
-			//	return
-		}
-	}
+	reply.WrongLeader = sm.start(args.ID, args.Seq, args)
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
@@ -190,21 +124,13 @@ func (sm *ShardMaster) balance() {
 		return
 	}
 	oldAvarage := NShards / len(sm.configs[len(sm.configs)-2].Groups)
-	//remainder := NShards % len(lastConfig.Groups)
 	diff, same, less := sm.findGroupChange()
-	//log.Printf("different: %v", diff)
-	//log.Printf("same: %v", same)
-	//log.Printf("is less group: %v", less)
 	counts := sm.countShards()
-	//log.Printf("counts: %v", counts)
-	var (
-		shards []int
-		gids   []int
-	)
+	var movedShards []int
 	// less groups
 	if less {
 		for _, gid := range diff {
-			shards = append(shards, counts[gid]...)
+			movedShards = append(movedShards, counts[gid]...)
 		}
 
 		var countMap PairList
@@ -219,14 +145,14 @@ func (sm *ShardMaster) balance() {
 			countMap = append(countMap, pair)
 		}
 		sort.Sort(countMap)
-		for i, shard := range shards {
+		for i, shard := range movedShards {
 			lastConfig.Shards[shard] = countMap[i%len(countMap)].Key
 		}
 	} else { // more groups
+		var gids []int
 		for _, gid := range diff {
 			gids = append(gids, gid)
 		}
-		var movedShards []int
 		for gid := range counts {
 			if len(counts[gid]) > oldAvarage {
 				movedShards = append(movedShards, counts[gid][0])
@@ -243,7 +169,6 @@ func (sm *ShardMaster) balance() {
 			lastConfig.Shards[shard] = diff[i%len(diff)]
 		}
 	}
-	//log.Printf("shards: %v", lastConfig.Shards)
 }
 
 func (sm *ShardMaster) findGroupChange() (diff []int, same []int, less bool) {
@@ -315,8 +240,7 @@ func (sm *ShardMaster) apply() {
 						sm.executed[op.ID] = op.Seq
 						sm.mu.Unlock()
 						if sm.rf.State() == raft.Leader && !msg.Recover {
-							//log.Printf("index of command: %v", msg.CommandIndex)
-							sm.done <- msg.CommandIndex
+							op.done <- struct{}{}
 						}
 						log.Printf("last config: %v", sm.lastConfig())
 					}
@@ -360,7 +284,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 
 	// Your code here.
-	sm.done = make(chan int, 100)
 	sm.executed = make(map[string]uint64)
 	go sm.apply()
 
