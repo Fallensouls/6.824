@@ -2,6 +2,7 @@ package shardmaster
 
 import (
 	"crypto/rand"
+	"log"
 	"github.com/Fallensouls/raft/raft"
 	"math/big"
 	"time"
@@ -43,11 +44,12 @@ func (ck *Clerk) Query(num int) Config {
 	args.Seq = ck.seq
 	args.Num = num
 	args.ID = ck.id
+	log.Println("query for config......")
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply QueryReply
-			ok := srv.Call("ShardMaster.Query", args, &reply)
+			ok := srv.Call("ShardMaster.Query", args, &reply) 
 			if ok && reply.WrongLeader == false {
 				return reply.Config
 			}

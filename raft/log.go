@@ -30,6 +30,26 @@ func newLog() *Log {
 	return &Log{state: &LogState{Entries: make([]LogEntry, 0)}}
 }
 
+func (l *Log) setMaxSize(maxSize uint64) {
+	l.state.MaxSize = maxSize
+}
+
+func (l *Log) maxSize() uint64 {
+	return l.state.MaxSize
+}
+
+func (l *Log) CommitIndex() uint64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.commitIndex
+}
+
+func (l *Log) LastApplied() uint64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.lastApplied
+}
+
 func (l *Log) lastIncludedTerm() uint64 {
 	return l.state.LastIncludedTerm
 }
@@ -194,9 +214,6 @@ func (l *Log) prevLogTermAndNewEntries(prevLogIndex uint64) (uint64, []LogEntry)
 }
 
 func (l *Log) appendEntries(req *AppendEntriesRequest, res *AppendEntriesResponse) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	if !(l.lastIncludedIndex() == req.PrevLogIndex && l.lastIncludedTerm() == req.PrevLogTerm) {
 		// reply false if receiver's log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm.
 		entry := l.entry(req.PrevLogIndex)
@@ -244,9 +261,6 @@ func (l *Log) lastIncludedIndexAndTerm() (uint64, uint64) {
 }
 
 func (l *Log) installSnapshot(req *InstallSnapshotRequest) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	// update lastIncludedIndex and LastIncludedTerm
 	l.setLastIncludedIndex(req.LastIncludedIndex)
 	l.setLastIncludedTerm(req.LastIncludedTerm)
@@ -285,9 +299,6 @@ func (l *Log) apply(applyCh chan<- ApplyMsg, recover uint64) {
 }
 
 func (l *Log) createSnapshot(snapshot Snapshot) (success bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	if snapshot.Index > l.lastApplied {
 		log.Panicf("can not create snapshot with log entries that haven't been applied")
 	}

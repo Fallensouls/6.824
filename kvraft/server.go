@@ -29,6 +29,7 @@ type Op struct {
 	Operation string
 	ID        string
 	Seq       uint64
+	Done      chan struct{}
 }
 
 type KVServer struct {
@@ -43,8 +44,9 @@ type KVServer struct {
 	// Your definitions here.
 	lastApplied uint64
 	done        chan int
-	db          map[string]string // key-value database
+	data        map[string]string // key-value database
 	executed    map[string]uint64 // the set of commands which have been executed
+	shutdown    chan struct{}
 }
 
 func (kv *KVServer) Get(req *GetRequest, res *GetResponse) {
@@ -79,7 +81,7 @@ func (kv *KVServer) Get(req *GetRequest, res *GetResponse) {
 	res.WrongLeader = false
 
 	var ok bool
-	if res.Value, ok = kv.db[req.Key]; ok {
+	if res.Value, ok = kv.data[req.Key]; ok {
 		res.Err = OK
 	} else {
 		res.Err = ErrNoKey
@@ -88,11 +90,6 @@ func (kv *KVServer) Get(req *GetRequest, res *GetResponse) {
 
 func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 	// return if receiver isn't the leader.
-	if kv.rf.State() != raft.Leader {
-		res.WrongLeader = true
-		return
-	}
-	res.WrongLeader = false
 
 	kv.mu.RLock()
 	seq := kv.executed[req.ID]
@@ -104,21 +101,32 @@ func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 
 	// print all the valid requests.
 	//log.Printf("server %v recieve request: %v", kv.rf.ID, req)
-
-	index, _, _ := kv.rf.Start(Op{Key: req.Key, Value: req.Value, Operation: req.Op, ID: req.ID, Seq: req.Seq})
-	timeout := time.NewTimer(10 * raft.HeartBeatInterval)
-	for {
-		select {
-		case doneIndex := <-kv.done:
-			if doneIndex == index {
-				res.Err = OK
-				return
-			}
-		case <-timeout.C:
-			timeout.Stop()
-			res.Err = ErrTimeout
-			return
-		}
+	op := Op{Key: req.Key, Value: req.Value, Operation: req.Op, ID: req.ID, Seq: req.Seq, Done: make(chan struct{})}
+	_, _, isLeader := kv.rf.Start(op)
+	// timeout := time.NewTimer(10 * raft.HeartBeatInterval)
+	// for {
+	// 	select {
+	// 	case doneIndex := <-kv.done:
+	// 		if doneIndex == index {
+	// 			res.Err = OK
+	// 			return
+	// 		}
+	// 	case <-timeout.C:
+	// 		timeout.Stop()
+	// 		res.Err = ErrTimeout
+	// 		return
+	// 	}
+	// }
+	if !isLeader {
+		res.WrongLeader = true
+		return
+	}
+	res.WrongLeader = false
+	select {
+	case <-op.Done:
+		res.Err = OK
+	case <-time.After(5 * raft.HeartBeatInterval):
+		res.Err = ErrTimeout
 	}
 }
 
@@ -128,10 +136,10 @@ func (kv *KVServer) createSnapshot(index uint64) {
 	e := labgob.NewEncoder(w)
 	kv.mu.RLock()
 	//if kv.rf.State() == raft.Leader {
-	log.Printf("database of server %v: %v", kv.rf.ID, kv.db)
+	log.Printf("database of server %v: %v", kv.rf.ID, kv.data)
 	//}
 	e.Encode(kv.executed)
-	e.Encode(kv.db)
+	e.Encode(kv.data)
 	kv.mu.RUnlock()
 	data := w.Bytes()
 	kv.rf.SnapshotData <- raft.Snapshot{Index: index, Data: data}
@@ -144,14 +152,17 @@ func (kv *KVServer) readSnapshot(data []byte) {
 	}
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-
+	kv.mu.Lock()
 	d.Decode(&kv.executed)
-	d.Decode(&kv.db)
+	d.Decode(&kv.data)
+	kv.mu.Unlock()
 }
 
-func (kv *KVServer) eventLoop() {
+func (kv *KVServer) run() {
 	for {
 		select {
+		case <-kv.shutdown:
+			return
 		// apply commands
 		case msg, ok := <-kv.applyCh:
 			if ok && !msg.NoOpCommand {
@@ -160,17 +171,18 @@ func (kv *KVServer) eventLoop() {
 						kv.mu.Lock()
 						switch op.Operation {
 						case "Put":
-							kv.db[op.Key] = op.Value
-							kv.executed[op.ID] = op.Seq
+							kv.data[op.Key] = op.Value
 						case "Append":
-							kv.db[op.Key] += op.Value
-							kv.executed[op.ID] = op.Seq
-						default:
+							kv.data[op.Key] += op.Value
 						}
+						kv.executed[op.ID] = op.Seq
 						kv.mu.Unlock()
-						if kv.rf.State() == raft.Leader && !msg.Recover {
-							kv.done <- msg.CommandIndex
-						}
+						go func(){
+							if kv.rf.State() == raft.Leader && !msg.Recover {
+								op.Done <- struct{}{}
+							}
+						}()
+
 						kv.lastApplied = uint64(msg.CommandIndex)
 						log.Printf("msg of server %v: %v", kv.rf.ID, msg)
 					}
@@ -196,6 +208,7 @@ func (kv *KVServer) eventLoop() {
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+	close(kv.shutdown)
 }
 
 //
@@ -223,17 +236,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.persister = persister
 
 	kv.done = make(chan int, 100)
-	kv.db = make(map[string]string)
+	kv.data = make(map[string]string)
 	kv.executed = make(map[string]uint64)
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.shutdown = make(chan struct{})
 
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.rf.SetMaxSize(kv.maxraftstate)
 	kv.readSnapshot(kv.rf.ReadSnapshot())
 
-	log.Printf("db of server %v: %v", kv.rf.ID, kv.db)
+	log.Printf("db of server %v: %v", kv.rf.ID, kv.data)
 	log.Printf("executed of server %v: %v", kv.rf.ID, kv.executed)
-	go kv.eventLoop()
+	go kv.run()
 
 	return kv
 }

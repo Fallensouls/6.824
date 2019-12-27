@@ -4,6 +4,7 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/Fallensouls/raft/labgob"
 	"github.com/Fallensouls/raft/labrpc"
@@ -19,6 +20,7 @@ type ShardMaster struct {
 	// Your data here.
 	executed map[string]uint64
 	configs  []Config // indexed by config num
+	shutdown chan struct{}
 }
 
 type Op struct {
@@ -32,7 +34,7 @@ type Op struct {
 	GIDs    []int
 	Shard   int
 	GID     int
-	done    chan struct{}
+	Done    chan struct{}
 }
 
 func (sm *ShardMaster) lastConfig() *Config {
@@ -40,17 +42,21 @@ func (sm *ShardMaster) lastConfig() *Config {
 }
 
 func (sm *ShardMaster) start(id string, seq uint64, args interface{}) (wrongLeader bool) {
-	if sm.executed[id] > seq {
+	sm.mu.Lock()
+	seqExecuted := sm.executed[id]
+	sm.mu.Unlock()
+
+	if seqExecuted > seq {
 		return
 	}
 	var op Op
 	switch args := args.(type) {
 	case *JoinArgs:
-		op = Op{ID: args.ID, Seq: args.Seq, Type: "Join", Servers: args.Servers, done: make(chan struct{})}
+		op = Op{ID: args.ID, Seq: args.Seq, Type: "Join", Servers: args.Servers, Done: make(chan struct{})}
 	case *LeaveArgs:
-		op = Op{ID: args.ID, Seq: args.Seq, Type: "Leave", GIDs: args.GIDs, done: make(chan struct{})}
+		op = Op{ID: args.ID, Seq: args.Seq, Type: "Leave", GIDs: args.GIDs, Done: make(chan struct{})}
 	case *MoveArgs:
-		op = Op{ID: args.ID, Seq: args.Seq, Type: "Move", Shard: args.Shard, GID: args.GID, done: make(chan struct{})}
+		op = Op{ID: args.ID, Seq: args.Seq, Type: "Move", Shard: args.Shard, GID: args.GID, Done: make(chan struct{})}
 	default:
 		return
 	}
@@ -60,7 +66,9 @@ func (sm *ShardMaster) start(id string, seq uint64, args interface{}) (wrongLead
 	}
 	for {
 		select {
-		case <-op.done:
+		case <-op.Done:
+			return
+		case <-time.After(5 * raft.HeartBeatInterval):
 			return
 		}
 	}
@@ -83,6 +91,9 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
 	if sm.executed[args.ID] > args.Seq {
 		return
 	}
@@ -90,8 +101,7 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 		reply.WrongLeader = true
 		return
 	}
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
+
 	if sm.rf.Read() != nil {
 		reply.WrongLeader = true
 		return
@@ -205,7 +215,7 @@ func (sm *ShardMaster) countShards() map[int][]int {
 	return count
 }
 
-func (sm *ShardMaster) apply() {
+func (sm *ShardMaster) run() {
 	for {
 		select {
 		case msg, ok := <-sm.applyCh:
@@ -240,12 +250,14 @@ func (sm *ShardMaster) apply() {
 						sm.executed[op.ID] = op.Seq
 						sm.mu.Unlock()
 						if sm.rf.State() == raft.Leader && !msg.Recover {
-							op.done <- struct{}{}
+							op.Done <- struct{}{}
 						}
 						log.Printf("last config: %v", sm.lastConfig())
 					}
 				}
 			}
+		case <- sm.shutdown:
+			return
 		}
 	}
 }
@@ -259,6 +271,7 @@ func (sm *ShardMaster) apply() {
 func (sm *ShardMaster) Kill() {
 	sm.rf.Kill()
 	// Your code here, if desired.
+	close(sm.shutdown)
 }
 
 // needed by shardkv tester
@@ -285,7 +298,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	// Your code here.
 	sm.executed = make(map[string]uint64)
-	go sm.apply()
+	sm.shutdown = make(chan struct{})
+	go sm.run()
 
 	return sm
 }
