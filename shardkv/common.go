@@ -49,3 +49,21 @@ type GetReply struct {
 	Err         Err
 	Value       string
 }
+
+type MigrateArgs struct {
+	Shards map[int]Shard
+}
+
+type MigrateReply struct {
+	WrongLeader bool
+	Err         Err
+}
+
+type PullArgs struct {
+	GID int
+}
+
+type PullReply struct {
+	WrongLeader bool
+	Data        map[int]Shard
+}

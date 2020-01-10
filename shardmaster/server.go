@@ -111,7 +111,6 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	} else {
 		reply.Config = sm.configs[args.Num]
 	}
-	log.Printf("reply of query: %v", reply)
 }
 
 func (sm *ShardMaster) balance() {

@@ -29,7 +29,6 @@ type Op struct {
 	Operation string
 	ID        string
 	Seq       uint64
-	Done      chan struct{}
 }
 
 type KVServer struct {
@@ -46,6 +45,7 @@ type KVServer struct {
 	done        chan int
 	data        map[string]string // key-value database
 	executed    map[string]uint64 // the set of commands which have been executed
+	notifyMap   sync.Map
 	shutdown    chan struct{}
 }
 
@@ -101,31 +101,20 @@ func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 
 	// print all the valid requests.
 	//log.Printf("server %v recieve request: %v", kv.rf.ID, req)
-	op := Op{Key: req.Key, Value: req.Value, Operation: req.Op, ID: req.ID, Seq: req.Seq, Done: make(chan struct{})}
-	_, _, isLeader := kv.rf.Start(op)
-	// timeout := time.NewTimer(10 * raft.HeartBeatInterval)
-	// for {
-	// 	select {
-	// 	case doneIndex := <-kv.done:
-	// 		if doneIndex == index {
-	// 			res.Err = OK
-	// 			return
-	// 		}
-	// 	case <-timeout.C:
-	// 		timeout.Stop()
-	// 		res.Err = ErrTimeout
-	// 		return
-	// 	}
-	// }
+	op := Op{Key: req.Key, Value: req.Value, Operation: req.Op, ID: req.ID, Seq: req.Seq}
+	index, _, isLeader := kv.rf.Start(op)
+	done := make(chan struct{})
+	kv.notifyMap.Store(index, done)
 	if !isLeader {
 		res.WrongLeader = true
 		return
 	}
 	res.WrongLeader = false
 	select {
-	case <-op.Done:
+	case <-done:
 		res.Err = OK
 	case <-time.After(5 * raft.HeartBeatInterval):
+		kv.notifyMap.Delete(index)
 		res.Err = ErrTimeout
 	}
 }
@@ -177,12 +166,13 @@ func (kv *KVServer) run() {
 						}
 						kv.executed[op.ID] = op.Seq
 						kv.mu.Unlock()
-						go func(){
-							if kv.rf.State() == raft.Leader && !msg.Recover {
-								op.Done <- struct{}{}
+						go func() {
+							if done, ok := kv.notifyMap.Load(msg.CommandIndex); ok {
+								done := done.(chan struct{})
+								done <- struct{}{}
+								kv.notifyMap.Delete(msg.CommandIndex)
 							}
 						}()
-
 						kv.lastApplied = uint64(msg.CommandIndex)
 						log.Printf("msg of server %v: %v", kv.rf.ID, msg)
 					}

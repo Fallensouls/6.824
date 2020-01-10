@@ -80,9 +80,7 @@ func TestStaticShards(t *testing.T) {
 	}
 	// bring the crashed shard/group back to life.
 	cfg.StartGroup(1)
-	fmt.Printf("restart\n")
 	for i := 0; i < n; i++ {
-		fmt.Printf("check for key %s, expected %s\n", ka[i], va[i])
 		check(t, ck, ka[i], va[i])
 	}
 

@@ -83,14 +83,13 @@ func (ck *Clerk) Get(key string) string {
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
-			log.Printf("servers: %v, key: %v", servers, key)
 		loop:
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				log.Printf("ok: %v", ok)
-				log.Printf("key: %s, reply: %v", key, reply)
+				log.Printf("get key: %s, reply: %v", key, reply)
 				if ok {
 					switch reply.Err {
 					case OK, ErrNoKey:
@@ -117,7 +116,7 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{key, value, op, ck.id, ck.seq}
-	
+
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
@@ -127,14 +126,25 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				log.Printf("ok: %v", ok)
-				log.Printf("key: %s, reply: %v", key, reply)
-				if ok && reply.WrongLeader == false && reply.Err == OK {
-					ck.seq++
-					return
+				log.Printf("put/append key: %s, reply: %v", key, reply)
+				if ok{
+					switch reply.Err{
+					case OK:
+						ck.seq++
+						return
+					case ErrWrongGroup:
+						break
+					case ErrExecuted:
+						return
+					}
 				}
-				if ok && (reply.Err == ErrWrongGroup || reply.Err == ErrExecuted) {
-					break
-				}
+				// if ok && reply.WrongLeader == false && reply.Err == OK {
+				// 	ck.seq++
+				// 	return
+				// }
+				// if ok && (reply.Err == ErrWrongGroup || reply.Err == ErrExecuted) {
+				// 	break
+				// }
 			}
 		}
 		time.Sleep(100 * time.Millisecond)

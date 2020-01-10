@@ -118,7 +118,9 @@ func (l *Log) entriesAfter(index uint64) []LogEntry {
 	}
 
 	storageIndex := index - l.state.LastIncludedIndex
-	return l.state.Entries[storageIndex:]
+	entries := make([]LogEntry, len(l.state.Entries)-int(storageIndex))
+	copy(entries, l.state.Entries[storageIndex:])
+	return entries
 }
 
 func (l *Log) applyMessage(index uint64, recover bool) ApplyMsg {

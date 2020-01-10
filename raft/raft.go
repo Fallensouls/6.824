@@ -725,7 +725,7 @@ func (rf *Raft) updateCommitIndex() {
 		rf.applyReqCh <- struct{}{}
 	}
 	rf.mu.Unlock()
-	
+
 }
 
 func (rf *Raft) needSnapshot() bool {
@@ -879,7 +879,7 @@ func (rf *Raft) run() {
 				msg.requests = append(msg.requests, Request{content: rf.newVoteRequest(true)})
 			case RequestVote:
 				msg.requests = append(msg.requests, Request{content: rf.newVoteRequest(false)})
-			default:
+			case AppendEntries:
 				rf.mu.RLock()
 				for i := range rf.peers {
 					if i != rf.me {

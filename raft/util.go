@@ -11,7 +11,7 @@ type Logger struct {
 	*log.Logger
 }
 
-var logger = NewLogger(true)
+var logger = NewLogger(false)
 
 func NewLogger(debug bool) *Logger {
 	return &Logger{
