@@ -429,8 +429,8 @@ type AppendEntriesResponse struct {
 	Index   uint64 // the index to be used for updating nextIndex and matchIndex
 
 	// extra information for conflicts
-	FirstIndex   uint64
-	ConflictTerm uint64
+	ConflictIndex uint64
+	ConflictTerm  uint64
 }
 
 func (rf *Raft) newAppendEntriesRequest(server int) *AppendEntriesRequest {
@@ -517,7 +517,13 @@ func (rf *Raft) handleAppendEntriesResponse(server int, res AppendEntriesRespons
 			rf.matchIndex[server] = res.Index
 		}
 	} else {
-		rf.nextIndex[server] = res.FirstIndex
+		rf.nextIndex[server] = res.ConflictIndex
+		if res.ConflictTerm > 0 {
+			lastIndex := rf.searchLastIndex(res.ConflictTerm)
+			if lastIndex > 0 {
+				rf.nextIndex[server] = lastIndex + 1
+			}
+		}
 	}
 	rf.updateCommitIndex()
 }

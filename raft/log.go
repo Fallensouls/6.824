@@ -151,6 +151,17 @@ func (l *Log) searchFirstIndex(index, term uint64) (firstIndex uint64) {
 	return 1
 }
 
+func (l *Log) searchLastIndex(term uint64) (lastIndex uint64) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for i := len(l.state.Entries) - 1; i >= 0; i-- {
+		if l.state.Entries[i].Term == term {
+			return uint64(i)
+		}
+	}
+	return
+}
+
 func (l *Log) discardLogBefore(index uint64) {
 	if index <= l.state.LastIncludedIndex {
 		return
@@ -222,14 +233,14 @@ func (l *Log) appendEntries(req *AppendEntriesRequest, res *AppendEntriesRespons
 
 		// Leader has more logs, let nextIndex be the last index of receiver plus one.
 		if entry == nil {
-			res.FirstIndex = l.lastIndex() + 1
+			res.ConflictIndex = l.lastIndex() + 1
 			return
 		}
 
 		// there are conflicting entries
 		if entry.Term != req.PrevLogTerm {
 			//res.FirstIndex = rf.log.searchFirstIndex(req.PrevLogIndex, entry.Term)
-			res.FirstIndex = req.PrevLogIndex - 1
+			res.ConflictIndex = l.searchFirstIndex(req.PrevLogIndex, entry.Term)
 			res.ConflictTerm = entry.Term
 			return
 		}
