@@ -76,9 +76,10 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
+	args := GetArgs{Key: key}
+
 	for {
+		args.Num = ck.config.Num
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
@@ -89,7 +90,7 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				log.Printf("ok: %v", ok)
-				log.Printf("get key: %s, reply: %v", key, reply)
+				log.Printf("config num %v, get key: %s, reply: %v", ck.config.Num, key, reply)
 				if ok {
 					switch reply.Err {
 					case OK, ErrNoKey:
@@ -115,9 +116,10 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{key, value, op, ck.id, ck.seq}
+	args := PutAppendArgs{Key: key, Value: value, Op: op, ID: ck.id, Seq: ck.seq}
 
 	for {
+		args.Num = ck.config.Num
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
@@ -127,15 +129,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				log.Printf("ok: %v", ok)
 				log.Printf("put/append key: %s, reply: %v", key, reply)
-				if ok{
-					switch reply.Err{
-					case OK:
+				if ok {
+					switch reply.Err {
+					case OK, ErrExecuted:
 						ck.seq++
 						return
 					case ErrWrongGroup:
 						break
-					case ErrExecuted:
-						return
+					// case ErrExecuted:
+						// return
 					}
 				}
 				// if ok && reply.WrongLeader == false && reply.Err == OK {

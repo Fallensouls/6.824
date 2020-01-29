@@ -13,6 +13,8 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
+	ErrConfigNum   = "ErrConfigNum"
+	ErrWaitingData = "ErrWaitingData"
 	ErrExecuted    = "ErrExecuted"
 	ErrTimeout     = "ErrTimeout"
 	ErrPartitioned = "ErrPartitioned"
@@ -24,6 +26,7 @@ type Err string
 // Put or Append
 type PutAppendArgs struct {
 	// You'll have to add definitions here.
+	Num   int
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
@@ -40,6 +43,7 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
+	Num int
 	Key string
 	// You'll have to add definitions here.
 }
@@ -51,7 +55,8 @@ type GetReply struct {
 }
 
 type MigrateArgs struct {
-	Shards map[int]Shard
+	ConfigNum int
+	Shards    map[int]Shard
 }
 
 type MigrateReply struct {
@@ -60,10 +65,12 @@ type MigrateReply struct {
 }
 
 type PullArgs struct {
-	GID int
+	ConfigNum int
+	Shards    []int
 }
 
 type PullReply struct {
 	WrongLeader bool
+	Err         Err
 	Data        map[int]Shard
 }
