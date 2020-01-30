@@ -103,18 +103,19 @@ func (kv *KVServer) PutAppend(req *PutAppendRequest, res *PutAppendResponse) {
 	//log.Printf("server %v recieve request: %v", kv.rf.ID, req)
 	op := Op{Key: req.Key, Value: req.Value, Operation: req.Op, ID: req.ID, Seq: req.Seq}
 	index, _, isLeader := kv.rf.Start(op)
-	done := make(chan struct{})
-	kv.notifyMap.Store(index, done)
 	if !isLeader {
 		res.WrongLeader = true
 		return
 	}
+	done := make(chan struct{}, 1)
+	kv.notifyMap.Store(index, done)
+	defer kv.notifyMap.Delete(index)
+
 	res.WrongLeader = false
 	select {
 	case <-done:
 		res.Err = OK
 	case <-time.After(5 * raft.HeartBeatInterval):
-		kv.notifyMap.Delete(index)
 		res.Err = ErrTimeout
 	}
 }
@@ -125,7 +126,7 @@ func (kv *KVServer) createSnapshot(index uint64) {
 	e := labgob.NewEncoder(w)
 	kv.mu.RLock()
 	//if kv.rf.State() == raft.Leader {
-	log.Printf("database of server %v: %v", kv.rf.ID, kv.data)
+	// log.Printf("database of server %v: %v", kv.rf.ID, kv.data)
 	//}
 	e.Encode(kv.executed)
 	e.Encode(kv.data)
@@ -165,16 +166,16 @@ func (kv *KVServer) run() {
 							kv.data[op.Key] += op.Value
 						}
 						kv.executed[op.ID] = op.Seq
-						kv.mu.Unlock()
-						go func() {
-							if done, ok := kv.notifyMap.Load(msg.CommandIndex); ok {
-								done := done.(chan struct{})
-								done <- struct{}{}
-								kv.notifyMap.Delete(msg.CommandIndex)
-							}
-						}()
 						kv.lastApplied = uint64(msg.CommandIndex)
-						log.Printf("msg of server %v: %v", kv.rf.ID, msg)
+						kv.mu.Unlock()
+
+						if done, ok := kv.notifyMap.Load(msg.CommandIndex); ok {
+							done := done.(chan struct{})
+							done <- struct{}{}
+							
+						}
+
+						// log.Printf("msg of server %v: %v", kv.rf.ID, msg)
 					}
 				}
 			}
@@ -235,8 +236,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf.SetMaxSize(kv.maxraftstate)
 	kv.readSnapshot(kv.rf.ReadSnapshot())
 
-	log.Printf("db of server %v: %v", kv.rf.ID, kv.data)
-	log.Printf("executed of server %v: %v", kv.rf.ID, kv.executed)
+	// log.Printf("db of server %v: %v", kv.rf.ID, kv.data)
+	// log.Printf("executed of server %v: %v", kv.rf.ID, kv.executed)
 	go kv.run()
 
 	return kv

@@ -33,8 +33,9 @@ type KeyValue struct {
 
 type State struct {
 	// OwnShards map[int]struct{}
-	Config shardmaster.Config
-	Data   map[int]Shard
+	Config   shardmaster.Config
+	Shards   map[int]Shard
+	Executed map[string]uint64
 }
 
 type ShardKV struct {
@@ -49,8 +50,6 @@ type ShardKV struct {
 
 	// Your definitions here.
 	sm          *shardmaster.Clerk
-	ownShards   map[int]struct{}
-	oldShards   map[int]struct{}
 	data        map[int]Shard
 	executed    map[string]uint64
 	notifyMap   sync.Map
@@ -128,7 +127,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	op := Op{KeyValue{args.Key, args.Value}, args.Op, args.ID, args.Seq}
 	index, _, isLeader := kv.rf.Start(op)
-
+	log.Printf("put/append data %v to gid %v, config number: %v", args.Value, kv.gid, args.Num)
 	if !isLeader {
 		reply.WrongLeader = true
 		return
@@ -152,16 +151,20 @@ func (kv *ShardKV) Migrate(args *PullArgs, reply *PullReply) {
 	kv.mu.RLock()
 	defer kv.mu.RUnlock()
 	if args.ConfigNum > kv.config.Num {
-		reply.Err = ErrConfigNum
+		reply.Err = ErrDataNotReady
 		return
 	}
 
 	log.Printf("pull args: %v", args)
-	reply.Data = make(map[int]Shard)
+	reply.Shards = make(map[int]Shard)
+	reply.Executed = make(map[string]uint64)
 	for _, shard := range args.Shards {
 		log.Printf("pull data: %v", kv.data[shard])
-		reply.Data[shard] = make(Shard)
-		reply.Data[shard] = kv.data[shard]
+		reply.Shards[shard] = make(Shard)
+		reply.Shards[shard] = kv.data[shard]
+	}
+	for id, seq := range kv.executed {
+		reply.Executed[id] = seq
 	}
 	reply.Err = OK
 }
@@ -215,58 +218,58 @@ func (kv *ShardKV) handleConfigChange() {
 }
 
 func (kv *ShardKV) updateConfig(oldConfig, newConfig shardmaster.Config) (isLeader bool) {
-	kv.mu.Lock()
-	kv.nextConfig = newConfig.Num
-	kv.mu.Unlock()
-	ownShards := make(map[int]struct{})
 	waitingShards := make(map[int][]int)
 	for shard, gid := range newConfig.Shards {
 		if gid == kv.gid {
-			ownShards[shard] = struct{}{}
 			if gid := oldConfig.Shards[shard]; gid != 0 && gid != kv.gid {
 				waitingShards[gid] = append(waitingShards[gid], shard)
 			}
 		}
 	}
-
-	shards := kv.pullShards(oldConfig, waitingShards)
-	op := Op{Data: State{newConfig, shards}, Type: "UpdateConfig"}
+	shards, executed := kv.pullShards(oldConfig, waitingShards)
+	kv.mu.Lock()
+	kv.nextConfig = newConfig.Num
+	op := Op{Data: State{newConfig, shards, executed}, Type: "UpdateConfig"}
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
+		log.Printf("gid %v lose data: %v", kv.gid, shards)
+		kv.nextConfig--
+		kv.mu.Unlock()
 		return
 	}
+	kv.mu.Unlock()
 	done := make(chan struct{}, 1)
 	kv.notifyMap.Store(index, done)
 	defer kv.notifyMap.Delete(index)
 	select {
 	case <-done:
 		return
-	case <-time.After(5 * raft.HeartBeatInterval):
-		return
+		// case <-time.After(5 * raft.HeartBeatInterval):
+		// 	return
 	}
 }
 
-func (kv *ShardKV) pullShards(config shardmaster.Config, waitingShards map[int][]int) (shards map[int]Shard) {
+func (kv *ShardKV) pullShards(config shardmaster.Config, waitingShards map[int][]int) (shards map[int]Shard, executed map[string]uint64) {
 	if len(waitingShards) == 0 {
 		return
 	}
-	log.Printf("gid %v pull shards, config num: %v", kv.gid, config.Num)
-	ch := make(chan map[int]Shard, len(waitingShards))
+	log.Printf("gid %v pull shards, config num: %v", kv.gid, config.Num+1)
+	ch := make(chan PullData, len(waitingShards))
 	for gid, shards := range waitingShards {
 		go func(gid int, shards []int) {
 			for {
 				if servers, ok := config.Groups[gid]; ok {
 					for si := 0; si < len(servers); si++ {
 						srv := kv.make_end(servers[si])
-						args := PullArgs{config.Num, shards}
+						args := PullArgs{config.Num + 1, shards}
 						var reply PullReply
 						ok := srv.Call("ShardKV.Migrate", &args, &reply)
 						log.Printf("ok: %v", ok)
-						log.Printf("arg: %v, reply: %v", args, reply)
+						log.Printf("pull data from %v, arg: %v, reply: %v", gid, args, reply)
 						if ok {
 							switch reply.Err {
 							case OK:
-								ch <- reply.Data
+								ch <- PullData{reply.Shards, reply.Executed}
 								return
 							}
 						}
@@ -276,24 +279,30 @@ func (kv *ShardKV) pullShards(config shardmaster.Config, waitingShards map[int][
 		}(gid, shards)
 	}
 	shards = make(map[int]Shard)
+	executed = make(map[string]uint64)
 	for done := 0; done < len(waitingShards); done++ {
 		select {
-		case shard := <-ch:
-			for num, data := range shard {
+		case data := <-ch:
+			for num, data := range data.Shards {
 				shards[num] = data
+			}
+			for id, seq := range data.Executed {
+				if executed[id] < seq {
+					executed[id] = seq
+				}
 			}
 		}
 	}
 	return
 }
 
-func (kv *ShardKV) cleanShards() {
-	for shard := range kv.data {
-		if _, ok := kv.ownShards[shard]; !ok {
-			delete(kv.data, shard)
-		}
-	}
-}
+// func (kv *ShardKV) cleanShards() {
+// 	for shard := range kv.data {
+// 		if _, ok := kv.ownShards[shard]; !ok {
+// 			delete(kv.data, shard)
+// 		}
+// 	}
+// }
 
 func (kv *ShardKV) run() {
 	for {
@@ -310,7 +319,7 @@ func (kv *ShardKV) run() {
 							if op.Type == "Put" {
 								shard[data.Key] = data.Value
 							} else {
-								// log.Printf("append key %v value %v to server %v", data.Key, data.Value, kv.rf.ID)
+								log.Printf("append key %v value %v to gid %v", data.Key, data.Value, kv.gid)
 								// log.Printf("ownshards of server %v: %v", kv.rf.ID, kv.ownShards)
 								shard[data.Key] += data.Value
 							}
@@ -321,24 +330,30 @@ func (kv *ShardKV) run() {
 						state := op.Data.(State)
 						if state.Config.Num > kv.config.Num {
 							kv.config = state.Config
-							if kv.rf.State() != raft.Leader {
+							if state.Config.Num > kv.nextConfig {
 								kv.nextConfig = state.Config.Num
 							}
 
-							for num, shard := range state.Data {
+							for num, shard := range state.Shards {
 								kv.data[num] = shard
+							}
+							for id, seq := range state.Executed {
+								if kv.executed[id] < seq {
+									kv.executed[id] = seq
+								}
 							}
 							log.Printf("gid %v updates config %v", kv.gid, kv.config.Num)
 						}
-					case "Clean":
-						kv.cleanShards()
+						log.Printf("migrate data: %v", state.Shards)
+						// case "Clean":
+						// 	kv.cleanShards()
 					}
+					kv.lastApplied = uint64(msg.CommandIndex)
 					kv.mu.Unlock()
 					if done, ok := kv.notifyMap.Load(msg.CommandIndex); ok {
 						done := done.(chan struct{})
 						done <- struct{}{}
 					}
-					kv.lastApplied = uint64(msg.CommandIndex)
 				}
 			}
 		// read snapshots from leader
@@ -434,14 +449,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// kv.config = kv.sm.Query(-1)
 	// kv.nextConfig = kv.config.Num
 	kv.pollTicker = time.NewTicker(pollInterval)
-	kv.ownShards = make(map[int]struct{})
-	kv.oldShards = make(map[int]struct{})
 
-	for shard, gid := range kv.config.Shards {
-		if gid == kv.gid {
-			kv.ownShards[shard] = struct{}{}
-		}
-	}
 	for i := 0; i < shardmaster.NShards; i++ {
 		kv.data[i] = make(Shard)
 	}

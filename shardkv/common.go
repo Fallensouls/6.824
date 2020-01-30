@@ -10,15 +10,15 @@ package shardkv
 //
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongGroup  = "ErrWrongGroup"
-	ErrConfigNum   = "ErrConfigNum"
-	ErrWaitingData = "ErrWaitingData"
-	ErrExecuted    = "ErrExecuted"
-	ErrTimeout     = "ErrTimeout"
-	ErrPartitioned = "ErrPartitioned"
-	ErrShutdown    = "ErrShutdown"
+	OK              = "OK"
+	ErrNoKey        = "ErrNoKey"
+	ErrWrongGroup   = "ErrWrongGroup"
+	ErrDataNotReady = "ErrDataNotReady"
+	ErrWaitingData  = "ErrWaitingData"
+	ErrExecuted     = "ErrExecuted"
+	ErrTimeout      = "ErrTimeout"
+	ErrPartitioned  = "ErrPartitioned"
+	ErrShutdown     = "ErrShutdown"
 )
 
 type Err string
@@ -54,16 +54,6 @@ type GetReply struct {
 	Value       string
 }
 
-type MigrateArgs struct {
-	ConfigNum int
-	Shards    map[int]Shard
-}
-
-type MigrateReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
 type PullArgs struct {
 	ConfigNum int
 	Shards    []int
@@ -72,5 +62,11 @@ type PullArgs struct {
 type PullReply struct {
 	WrongLeader bool
 	Err         Err
-	Data        map[int]Shard
+	Shards      map[int]Shard
+	Executed    map[string]uint64
+}
+
+type PullData struct {
+	Shards   map[int]Shard
+	Executed map[string]uint64
 }

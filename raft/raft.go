@@ -20,7 +20,6 @@ package raft
 import (
 	"bytes"
 	"errors"
-	"log"
 	"math/rand"
 	"sort"
 	"sync/atomic"
@@ -946,14 +945,14 @@ func (rf *Raft) runLog() {
 			rf.apply(rf.applyCh, rf.recover)
 			if rf.needSnapshot() {
 				rf.SnapshotCh <- struct{}{}
+				snapshot := <-rf.SnapshotData
+				// log.Printf("server %v creates snapshot at index %v", rf.ID, snapshot.Index)
+				rf.mu.Lock()
+				if rf.createSnapshot(snapshot) {
+					rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot.Data)
+				}
+				rf.mu.Unlock()
 			}
-		case snapshot := <-rf.SnapshotData:
-			log.Printf("server %v creates snapshot at index %v", rf.ID, snapshot.Index)
-			rf.mu.Lock()
-			if rf.createSnapshot(snapshot) {
-				rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot.Data)
-			}
-			rf.mu.Unlock()
 		}
 	}
 }
