@@ -734,7 +734,7 @@ func (rf *Raft) updateCommitIndex() {
 }
 
 func (rf *Raft) needSnapshot() bool {
-	return rf.persister.RaftStateSize() >= int(rf.maxSize()) && rf.maxSize() != 0
+	return rf.maxSize() != 0 && rf.persister.RaftStateSize() >= int(rf.maxSize())
 }
 
 func (rf *Raft) ReadSnapshot() []byte {

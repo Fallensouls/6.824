@@ -76,10 +76,9 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{Key: key}
+	args := GetArgs{ck.config.Num, key}
 
 	for {
-		args.Num = ck.config.Num
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
@@ -106,6 +105,7 @@ func (ck *Clerk) Get(key string) string {
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
+		args = GetArgs{ck.config.Num, key}
 	}
 
 	return ""
@@ -116,10 +116,10 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{Key: key, Value: value, Op: op, ID: ck.id, Seq: ck.seq}
+	args := PutAppendArgs{Num: ck.config.Num, Key: key, Value: value, Op: op, ID: ck.id, Seq: ck.seq}
 
 	for {
-		args.Num = ck.config.Num
+		// args.Num = ck.config.Num
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
@@ -136,7 +136,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 						return
 					case ErrWrongGroup:
 						break
-					// case ErrExecuted:
+						// case ErrExecuted:
 						// return
 					}
 				}
@@ -152,6 +152,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
+		args = PutAppendArgs{Num: ck.config.Num, Key: key, Value: value, Op: op, ID: ck.id, Seq: ck.seq}
 	}
 }
 

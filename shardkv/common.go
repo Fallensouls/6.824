@@ -70,3 +70,13 @@ type PullData struct {
 	Shards   map[int]Shard
 	Executed map[string]uint64
 }
+
+type DeleteArgs struct {
+	ConfigNum int
+	Shards    []int
+}
+
+type DeleteReply struct {
+	WrongLeader bool
+	Err         Err
+}
