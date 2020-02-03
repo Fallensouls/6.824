@@ -18,9 +18,10 @@ type ShardMaster struct {
 	applyCh chan raft.ApplyMsg
 
 	// Your data here.
-	executed map[string]uint64
-	configs  []Config // indexed by config num
-	shutdown chan struct{}
+	executed  map[string]uint64
+	configs   []Config // indexed by config num
+	notifyMap sync.Map
+	shutdown  chan struct{}
 }
 
 type Op struct {
@@ -34,7 +35,6 @@ type Op struct {
 	GIDs    []int
 	Shard   int
 	GID     int
-	Done    chan struct{}
 }
 
 func (sm *ShardMaster) lastConfig() *Config {
@@ -52,23 +52,26 @@ func (sm *ShardMaster) start(id string, seq uint64, args interface{}) (wrongLead
 	var op Op
 	switch args := args.(type) {
 	case *JoinArgs:
-		op = Op{ID: args.ID, Seq: args.Seq, Type: "Join", Servers: args.Servers, Done: make(chan struct{})}
+		op = Op{ID: args.ID, Seq: args.Seq, Type: "Join", Servers: args.Servers}
 	case *LeaveArgs:
-		op = Op{ID: args.ID, Seq: args.Seq, Type: "Leave", GIDs: args.GIDs, Done: make(chan struct{})}
+		op = Op{ID: args.ID, Seq: args.Seq, Type: "Leave", GIDs: args.GIDs}
 	case *MoveArgs:
-		op = Op{ID: args.ID, Seq: args.Seq, Type: "Move", Shard: args.Shard, GID: args.GID, Done: make(chan struct{})}
+		op = Op{ID: args.ID, Seq: args.Seq, Type: "Move", Shard: args.Shard, GID: args.GID}
 	default:
 		return
 	}
-	_, _, isLeader := sm.rf.Start(op)
+	index, _, isLeader := sm.rf.Start(op)
 	if !isLeader {
 		return true
 	}
+	done := make(chan struct{}, 1)
+	sm.notifyMap.Store(index, done)
+	defer sm.notifyMap.Delete(index)
 	for {
 		select {
-		case <-op.Done:
+		case <-done:
 			return
-		case <-time.After(5 * raft.HeartBeatInterval):
+		case <-time.After(100 * time.Millisecond):
 			return
 		}
 	}
@@ -248,14 +251,15 @@ func (sm *ShardMaster) run() {
 						}
 						sm.executed[op.ID] = op.Seq
 						sm.mu.Unlock()
-						if sm.rf.State() == raft.Leader && !msg.Recover {
-							op.Done <- struct{}{}
+						if done, ok := sm.notifyMap.Load(msg.CommandIndex); ok {
+							done := done.(chan struct{})
+							done <- struct{}{}
 						}
 						log.Printf("last config: %v", sm.lastConfig())
 					}
 				}
 			}
-		case <- sm.shutdown:
+		case <-sm.shutdown:
 			return
 		}
 	}

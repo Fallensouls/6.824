@@ -496,9 +496,8 @@ func (rf *Raft) handleAppendEntries(req *AppendEntriesRequest, res *AppendEntrie
 	// not a heartbeat
 	if req.Entries != nil {
 		res.Index = req.Entries[len(req.Entries)-1].Index
+		rf.applyReqCh <- struct{}{}
 	}
-
-	rf.applyReqCh <- struct{}{}
 	rf.persist()
 }
 
