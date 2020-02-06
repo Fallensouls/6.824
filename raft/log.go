@@ -211,9 +211,6 @@ func (l *Log) isUpToDate(req *RequestVoteRequest) bool {
  */
 
 func (l *Log) prevLogTermAndNewEntries(prevLogIndex uint64) (uint64, []LogEntry) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
 	var prevLogTerm uint64
 	if prevLogIndex == l.lastIncludedIndex() {
 		prevLogTerm = l.lastIncludedTerm()
@@ -268,8 +265,6 @@ func (l *Log) appendEntries(req *AppendEntriesRequest, res *AppendEntriesRespons
  */
 
 func (l *Log) lastIncludedIndexAndTerm() (uint64, uint64) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
 	return l.state.LastIncludedIndex, l.state.LastIncludedTerm
 }
 

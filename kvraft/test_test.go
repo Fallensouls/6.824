@@ -242,22 +242,17 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		}
 
 		if crash {
-			time.Sleep(15 * time.Millisecond)
-			// log.Printf("shutdown servers\n")
 			for i := 0; i < nservers; i++ {
 				cfg.ShutdownServer(i)
 			}
-			log.Printf("all server crash")
 			// Wait for a while for servers to shutdown, since
 			// shutdown isn't a real crash and isn't instantaneous
 			time.Sleep(electionTimeout)
-			// log.Printf("restart servers\n")
 			// crash and re-start all
 			for i := 0; i < nservers; i++ {
 				cfg.StartServer(i)
 			}
 			cfg.ConnectAll()
-			//time.Sleep(15 * time.Millisecond)
 		}
 
 		// log.Printf("wait for clients\n")
@@ -388,7 +383,6 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 		}
 
 		if crash {
-			time.Sleep(15 * time.Millisecond)
 			// log.Printf("shutdown servers\n")
 			for i := 0; i < nservers; i++ {
 				cfg.ShutdownServer(i)
