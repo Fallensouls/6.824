@@ -155,6 +155,7 @@ func (kv *KVServer) run() {
 			return
 		// apply commands
 		case msg, ok := <-kv.applyCh:
+			kv.lastApplied = uint64(msg.CommandIndex)
 			if ok && !msg.NoOpCommand {
 				if op, ok := msg.Command.(Op); ok {
 					if kv.executed[op.ID] < op.Seq {
@@ -166,15 +167,12 @@ func (kv *KVServer) run() {
 							kv.data[op.Key] += op.Value
 						}
 						kv.executed[op.ID] = op.Seq
-						kv.lastApplied = uint64(msg.CommandIndex)
 						kv.mu.Unlock()
 
 						if done, ok := kv.notifyMap.Load(msg.CommandIndex); ok {
 							done := done.(chan struct{})
 							done <- struct{}{}
-							
 						}
-
 						// log.Printf("msg of server %v: %v", kv.rf.ID, msg)
 					}
 				}

@@ -370,6 +370,7 @@ func (rf *Raft) handleRequestVote(req *RequestVoteRequest, res *RequestVoteRespo
 	// if receiver is not a Candidate and upToDate is true, the Candidate will receive a vote.
 	if canVote && upToDate && time.Now().Sub(rf.lastHeartBeat) > rf.heartBeatInterval/2 {
 		//log.Printf("%s voted for: %s", rf.ID, req.CandidateId)
+		reset = true
 		if !req.PreVote {
 			rf.votedFor = req.CandidateId
 		}
@@ -551,7 +552,6 @@ func (rf *Raft) newInstallSnapshotRequest() *InstallSnapshotRequest {
 // handleInstallSnapshot rpc will be send when the leader has already
 // discarded the next log entry that it needs to send to a follower.
 func (rf *Raft) handleInstallSnapshot(req *InstallSnapshotRequest, res *InstallSnapshotResponse) (reset bool) {
-
 	//log.Printf("server %s recieves snapshot rpc: %v", rf.ID, req)
 	res.Term = rf.currentTerm
 	if rf.currentTerm <= req.Term {
@@ -568,18 +568,16 @@ func (rf *Raft) handleInstallSnapshot(req *InstallSnapshotRequest, res *InstallS
 
 	// save snapshot
 	rf.mu.Lock()
-	rf.persister.SaveStateAndSnapshot(rf.encodeState(), req.Data)
 	rf.installSnapshot(req)
 	rf.commitIndex = req.LastIncludedIndex
 	rf.lastApplied = req.LastIncludedIndex
 	rf.InstallSnapshotCh <- rf.lastIncludedIndex()
-	rf.persist()
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), req.Data)
 	rf.mu.Unlock()
 	return
 }
 
 func (rf *Raft) handleInstallSnapshotResponse(server int, res InstallSnapshotResponse) (reset bool) {
-
 	if rf.currentTerm < res.Term {
 		rf.convertToFollower(res.Term)
 		return true
@@ -690,7 +688,7 @@ func (rf *Raft) heartBeat() error {
 		}
 	}
 	j := 1
-	timeout := time.NewTimer(time.Second)
+	timeout := time.NewTimer(5 * HeartBeatInterval)
 	for {
 		select {
 		case <-res:
@@ -764,7 +762,10 @@ func (rf *Raft) followerLoop() {
 			}
 		case r := <-rf.res:
 			if reset := rf.processRes(r); reset {
-				return
+				if !electionTimer.Stop() {
+					<-electionTimer.C
+				}
+				electionTimer.Reset(rf.electionTimeout)
 			}
 		}
 	}
@@ -936,6 +937,26 @@ func (rf *Raft) processRes(r Response) (reset bool) {
 	return
 }
 
+func (rf *Raft) run() {
+	for {
+		select {
+		case <-rf.shutdown:
+			return
+		default:
+			switch rf.State() {
+			case Leader:
+				rf.leaderLoop()
+			case PreCandidate:
+				rf.preCandidateLoop()
+			case Candidate:
+				rf.candidateLoop()
+			case Follower:
+				rf.followerLoop()
+			}
+		}
+	}
+}
+
 func (rf *Raft) runLog() {
 	for {
 		select {
@@ -946,10 +967,11 @@ func (rf *Raft) runLog() {
 			if rf.needSnapshot() {
 				rf.SnapshotCh <- struct{}{}
 				snapshot := <-rf.SnapshotData
-				// log.Printf("server %v creates snapshot at index %v", rf.ID, snapshot.Index)
 				rf.mu.Lock()
 				if rf.createSnapshot(snapshot) {
+					// log.Printf("server %v creates snapshot at index %v", rf.ID, snapshot.Index)
 					rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot.Data)
+					// log.Printf("server %v log size: %v, last log index: %v", rf.ID, rf.persister.RaftStateSize(), rf.lastIndex())
 				}
 				rf.mu.Unlock()
 			}
@@ -1097,32 +1119,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartBeatInterval = 40 * time.Millisecond
 	rf.preVote = true
 
-	go func() {
-		for {
-			select {
-			case <-rf.shutdown:
-				return
-			default:
-				switch rf.State() {
-				case Leader:
-					rf.leaderLoop()
-				case PreCandidate:
-					rf.preCandidateLoop()
-				case Candidate:
-					rf.candidateLoop()
-				case Follower:
-					rf.followerLoop()
-				}
-			}
-		}
-	}()
-
 	// initialize from state persisted before a crash
 	rf.restore(persister.ReadRaftState())
 	rf.commitIndex = rf.lastIncludedIndex()
 	rf.lastApplied = rf.lastIncludedIndex()
 	rf.recover = rf.lastIndex()
 
+	go rf.run()
 	go rf.runLog()
 	return rf
 }
