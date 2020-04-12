@@ -153,7 +153,6 @@ type Raft struct {
 	SnapshotCh        chan struct{}
 	InstallSnapshotCh chan uint64
 	SnapshotData      chan Snapshot
-	resetCh           chan struct{} // signal for converting to Follower and reset election ticker
 	applyReqCh        chan struct{}
 	applyCh           chan ApplyMsg
 	shutdown          chan struct{} // shutdown raft node
@@ -1106,7 +1105,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.cmd = make(chan *Command)
 	rf.event = make(chan *Event)
 	rf.res = make(chan Response)
-	rf.resetCh = make(chan struct{})
 	rf.SnapshotCh = make(chan struct{})
 	rf.InstallSnapshotCh = make(chan uint64)
 	rf.SnapshotData = make(chan Snapshot)
